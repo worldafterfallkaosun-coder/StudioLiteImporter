@@ -1,12 +1,25 @@
 --[[
-    Studio Lite RBXM/RBXMX Importer v3 Pro  (Delta executor)
+    Studio Lite RBXM/RBXMX Importer v4 Explorer  (Delta executor)
     Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
 
     Cara pakai
       1. Taruh file .rbxm / .rbxmx di mana saja di folder workspace Delta
          (disarankan: <Delta>/Workspace/StudioLiteImports/, dibuat otomatis).
       2. Masuk ke Studio Lite, execute script ini lewat Delta.
-      3. Cari / centang satu atau banyak file, pilih target, tekan Import.
+      3. Cari / centang satu atau banyak file, pilih target (tombol To: -> tab Explorer),
+         lalu tekan Import.
+
+    Baru di v4 Explorer
+      - Tab "Explorer": memindai isi Explorer Studio Lite (Workspace, ReplicatedStorage,
+        StarterGui, StarterPack, Lighting, dst.) secara LIVE dan menampilkannya sebagai
+        pohon di UI. Objek baru / dihapus muncul otomatis (sekitar 0.5 detik).
+      - Tombol "To:" di tab Files membuka tab Explorer. Tap objek mana pun (folder,
+        model, GUI, dst.) untuk dijadikan target Import, bukan cuma 5 service tetap.
+      - Cari objek / class di seluruh Explorer, buka-tutup cabang, Favorit (PIN) dan
+        daftar "Terakhir dipakai" (tersimpan antar sesi).
+      - Pengaturan > "Semua service" menampilkan service lain di pohon Explorer.
+      - Diagnosa: "Scan GUI Explorer Studio Lite" mencatat struktur GUI Explorer bawaan
+        game ke Log / file / clipboard.
 
     Baru di v3 Pro
       - Scanner rekursif: semua file .rbxm / .rbxmx di seluruh workspace executor
@@ -49,6 +62,7 @@ local CONFIG = {
     ScanScope = "all",           -- "all" = seluruh workspace executor, "folder" = hanya Folder
     AutoImportNew = false,       -- import otomatis file BARU yang muncul di Folder
     AutoHideAfterImport = false, -- sembunyikan UI setelah batch selesai
+    ExplorerAllServices = false, -- tampilkan semua service di pohon Explorer (bukan hanya yang umum)
 
     -- tuning scanner
     AutoScanInterval = 6,        -- detik
@@ -56,6 +70,12 @@ local CONFIG = {
     MaxEntries = 8000,
     InspectMaxBytes = 6 * 1024 * 1024,
     SkipFolders = { scripts_out = true, [".git"] = true, node_modules = true },
+
+    -- tuning Explorer live
+    ExplorerRefresh = 2,         -- detik, rebuild penuh selama tab Explorer terbuka
+    ExplorerMaxChildren = 500,   -- anak yang ditampilkan per cabang (sisanya lewat pencarian)
+    ExplorerSearchMax = 40000,   -- batas objek yang diperiksa saat mencari
+    ExplorerSearchResults = 300, -- batas hasil pencarian
 
     ToggleKey = Enum.KeyCode.RightControl,
     StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true },
@@ -1134,11 +1154,11 @@ end
 -- ENGINE (jalan terus walau UI disembunyikan)
 -- ===================================================================
 
-local TARGETS = { "Workspace", "ReplicatedStorage", "StarterGui", "StarterPack", "Lighting" }
-local TARGET_SHORT = {
-    Workspace = "Workspace", ReplicatedStorage = "ReplStorage",
-    StarterGui = "StarterGui", StarterPack = "StarterPack", Lighting = "Lighting",
-}
+-- urutan service di pohon Explorer (service lain muncul kalau "Semua service" aktif)
+local ROOT_ORDER = { "Workspace", "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "StarterPack",
+    "StarterPlayer", "Lighting", "SoundService", "Teams", "Players" }
+local ROOT_HIDE = { CoreGui = true, CorePackages = true, RobloxPluginGui = true,
+    PluginGuiService = true, NetworkClient = true }
 local SORTS = { "name", "name_desc", "folder", "format" }
 local SORT_LABEL = { name = "Nama A-Z", name_desc = "Nama Z-A", folder = "Folder", format = "Format" }
 
@@ -1165,6 +1185,19 @@ local S = {
     ui = {},
 }
 local E = {}
+
+-- state Explorer live (pohon instance yang dipakai sebagai target import)
+local X = {
+    expanded = setmetatable({}, { __mode = "k" }), -- [Instance] = true (cabang terbuka)
+    kidCache = setmetatable({}, { __mode = "k" }), -- [Instance] = { jumlah anak, waktu }
+    pinSet = setmetatable({}, { __mode = "k" }),   -- [Instance] = path favorit
+    pathCache = {},                                -- [path] = { inst, waktu }
+    rows = {}, results = {}, query = "", qToken = 0,
+    searching = false, searchBusy = false, searchStale = false, searchTrunc = false,
+    searchToken = 0, lastSearch = 0,
+    dirty = true, active = false, hooked = false, lastTargetOk = true, stamp = "",
+    pins = {}, recent = {},
+}
 
 -- UI mendaftarkan callback di sini; engine hanya memanggil lewat fire()
 local H = {}
@@ -1201,7 +1234,7 @@ end
 
 -- ---- Pengaturan tersimpan ----
 local PERSIST = { "DisableScripts", "SpawnInFrontOfCamera", "InstallScriptText", "AutoScan",
-    "ScanScope", "AutoImportNew", "AutoHideAfterImport" }
+    "ScanScope", "AutoImportNew", "AutoHideAfterImport", "ExplorerAllServices" }
 
 function E.loadSettings()
     if not (isfile and readfile) then return end
@@ -1215,7 +1248,18 @@ function E.loadSettings()
         if t[k] ~= nil then CONFIG[k] = t[k] end
     end
     if CONFIG.ScanScope ~= "all" and CONFIG.ScanScope ~= "folder" then CONFIG.ScanScope = "all" end
-    if table.find(TARGETS, t.target) then S.target = t.target end
+    -- target disimpan sebagai path ("Workspace/Map/Props"), dicocokkan ulang saat dipakai
+    if type(t.target) == "string" and t.target ~= "" then S.target = t.target end
+    local function strList(v, max)
+        local out = {}
+        if type(v) == "table" then
+            for _, p in ipairs(v) do
+                if type(p) == "string" and p ~= "" and #out < max then out[#out + 1] = p end
+            end
+        end
+        return out
+    end
+    X.pins, X.recent = strList(t.pins, 12), strList(t.recent, 6)
     if table.find(SORTS, t.sort) then S.sort = t.sort end
     if t.filter == "all" or t.filter == "rbxm" or t.filter == "rbxmx" then S.filter = t.filter end
     if type(t.ui) == "table" then S.ui = t.ui end
@@ -1227,7 +1271,8 @@ function E.saveSettings()
     saveQueued = true
     task.delay(1, function()
         saveQueued = false
-        local data = { target = S.target, sort = S.sort, filter = S.filter, ui = S.ui }
+        local data = { target = S.target, sort = S.sort, filter = S.filter, ui = S.ui,
+            pins = X.pins, recent = X.recent }
         for _, k in ipairs(PERSIST) do data[k] = CONFIG[k] end
         local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
         if ok then
@@ -1385,6 +1430,10 @@ function E.rescan(silent) task.spawn(rescan, silent) end
 -- ---- Import satu file ----
 -- return: ok, pesan, objek yang ditambahkan, daftar script
 local function doImport(path, opts, placeState)
+    local target = opts.target
+    if typeof(target) ~= "Instance" or not target:IsDescendantOf(game) then
+        return false, "target import tidak ditemukan (dihapus?), pilih ulang di tab Explorer"
+    end
     local objs, how, data = loadFile(path)
     if not objs then return false, how end
 
@@ -1403,18 +1452,17 @@ local function doImport(path, opts, placeState)
         end
     end
 
-    local target = game:GetService(opts.target)
     local added = {}
     for _, obj in ipairs(objs) do
         sanitize(obj)
-        if target == workspace and CONFIG.SpawnInFrontOfCamera then
+        if CONFIG.SpawnInFrontOfCamera and (target == workspace or target:IsDescendantOf(workspace)) then
             placeInFront(obj, placeState)
         end
         local ok = pcall(function() obj.Parent = target end)
         if ok then added[#added + 1] = obj end
     end
 
-    local msg = string.format("%s -> %s: %d objek (via %s)", displayName(path), opts.target, #added, how)
+    local msg = string.format("%s -> %s: %d objek (via %s)", displayName(path), X.pathOf(target), #added, how)
     if #scripts > 0 then
         if CONFIG.InstallScriptText then
             msg = msg .. string.format(", teks script %d/%d", stats.ok, #scripts)
@@ -1432,20 +1480,27 @@ end
 function E.runBatch(list)
     if S.busy then notify("Masih ada proses berjalan.", "warn") return end
     if #list == 0 then notify("Belum ada file dipilih.", "warn") return end
+    local tinst = E.getTarget()
+    if not tinst then
+        notify("Target import tidak ditemukan: " .. S.target .. ". Pilih ulang di tab Explorer.", "err")
+        return
+    end
+    local tlabel = X.pathOf(tinst)
+    X.pushRecent(tinst)
     S.busy, S.cancel = true, false
     fire("busy", true)
 
     local function body()
         local total = #list
-        local batch = { objs = {}, target = S.target, count = total }
+        local batch = { objs = {}, target = tlabel, count = total }
         local okN, failN, objN, scriptN = 0, 0, 0, 0
         local placeState = { offset = 0 }
         local allScripts = {}
         local report = {
             "# Import log " .. os.date("%Y-%m-%d %H:%M:%S"),
-            "target: " .. S.target, "file: " .. total, "",
+            "target: " .. tlabel, "file: " .. total, "",
         }
-        logLine(string.format("Batch dimulai: %d file -> %s", total, S.target), "info")
+        logLine(string.format("Batch dimulai: %d file -> %s", total, tlabel), "info")
 
         for i, e in ipairs(list) do
             if S.cancel or not alive() then
@@ -1457,7 +1512,8 @@ function E.runBatch(list)
             fire("rows")
             task.wait()
 
-            local okc, ok, msg, added, scripts, stats = pcall(doImport, e.raw, { target = S.target }, placeState)
+            local okc, ok, msg, added, scripts, stats = pcall(doImport, e.raw,
+                { target = E.getTarget() or tinst }, placeState)
             if not okc then
                 msg = tostring(ok)
                 ok = false
@@ -1606,6 +1662,493 @@ function E.addManual(text)
     end
     return false
 end
+
+-- ===================================================================
+-- EXPLORER LIVE (pohon instance Studio Lite -> pilihan "Import to")
+-- ===================================================================
+-- Explorer Studio Lite menampilkan isi game di sisi client, jadi sumbernya diambil
+-- langsung dari DataModel (Workspace, ReplicatedStorage, StarterGui, dst.) lalu diikuti
+-- perubahannya secara live. Hasilnya tampil di tab Explorer sebagai pohon yang bisa
+-- dibuka-tutup, dicari, dipin, dan dipilih sebagai target import.
+
+local function inGame(inst)
+    return typeof(inst) == "Instance" and inst:IsDescendantOf(game)
+end
+
+local function kidsOf(inst)
+    local ok, list = pcall(inst.GetChildren, inst)
+    if ok and type(list) == "table" then return list end
+    return {}
+end
+
+-- "Workspace/Map/Props". unique=true menambah #n untuk nama kembar (dipakai untuk simpan).
+function X.pathOf(inst, unique)
+    local parts, cur, guard = {}, inst, 0
+    while cur and cur ~= game and guard < 100 do
+        local seg = cur.Name
+        if unique and cur.Parent then
+            local same, idx = 0, 0
+            for _, c in ipairs(kidsOf(cur.Parent)) do
+                if c.Name == cur.Name then
+                    same = same + 1
+                    if c == cur then idx = same end
+                end
+            end
+            if same > 1 then seg = seg .. "#" .. idx end
+        end
+        table.insert(parts, 1, seg)
+        cur = cur.Parent
+        guard = guard + 1
+    end
+    return table.concat(parts, "/")
+end
+
+local function pickChild(parent, seg)
+    local name, idx = seg:match("^(.-)#(%d+)$")
+    if name then
+        local n = 0
+        for _, c in ipairs(kidsOf(parent)) do
+            if c.Name == name then
+                n = n + 1
+                if n == tonumber(idx) then return c end
+            end
+        end
+    end
+    return parent:FindFirstChild(seg)
+end
+
+function X.resolve(path)
+    if type(path) ~= "string" or path == "" then return nil end
+    local cur = game
+    for seg in path:gmatch("[^/]+") do
+        cur = pickChild(cur, seg)
+        if not cur then return nil end
+    end
+    if cur == game then return nil end
+    return cur
+end
+
+-- resolve dengan cache (objek yang hilang dicoba lagi paling cepat tiap 3 detik)
+function X.lookup(path)
+    local c = X.pathCache[path]
+    if c and c.inst and inGame(c.inst) then return c.inst end
+    local now = os.clock()
+    if c and not c.inst and now - c.t < 3 then return nil end
+    local inst = X.resolve(path)
+    X.pathCache[path] = { inst = inst, t = now }
+    return inst
+end
+
+function X.kidCount(inst)
+    local c = X.kidCache[inst]
+    local now = os.clock()
+    if c and now - c[2] < 1.5 then return c[1] end
+    local n = #kidsOf(inst)
+    X.kidCache[inst] = { n, now }
+    return n
+end
+
+local function sortedKids(inst)
+    local list = kidsOf(inst)
+    X.kidCache[inst] = { #list, os.clock() }
+    if #list <= 2000 then
+        local keyed = table.create(#list)
+        for i, c in ipairs(list) do keyed[i] = { c, c.Name:lower() } end
+        table.sort(keyed, function(a, b)
+            if a[2] ~= b[2] then return a[2] < b[2] end
+            return a[1].ClassName < b[1].ClassName
+        end)
+        for i, k in ipairs(keyed) do list[i] = k[1] end
+    end
+    return list
+end
+
+function X.roots()
+    local out, seen = {}, {}
+    local function add(svc)
+        if svc and not seen[svc] then
+            seen[svc] = true
+            out[#out + 1] = svc
+        end
+    end
+    for _, n in ipairs(ROOT_ORDER) do
+        local ok, svc = pcall(function() return game:FindService(n) end)
+        if ok then add(svc) end
+    end
+    if CONFIG.ExplorerAllServices then
+        for _, c in ipairs(kidsOf(game)) do
+            if not ROOT_HIDE[c.ClassName] then add(c) end
+        end
+    end
+    return out
+end
+
+-- ---- target import ----
+function E.getTarget()
+    local t = S.targetInst
+    if t and inGame(t) then return t end
+    local r = X.lookup(S.target)
+    S.targetInst = r
+    return r
+end
+
+function E.setTarget(inst)
+    if S.busy then
+        notify("Tunggu batch selesai dulu sebelum ganti target.", "warn")
+        return false
+    end
+    if not inGame(inst) then
+        notify("Target tidak valid (objek sudah dihapus).", "warn")
+        return false
+    end
+    S.targetInst = inst
+    S.target = X.pathOf(inst, true)
+    X.pathCache[S.target] = { inst = inst, t = os.clock() }
+    X.lastTargetOk = true
+    E.saveSettings()
+    fire("target")
+    setStatus("Target import: " .. X.pathOf(inst), "ok")
+    return true
+end
+
+function X.pushRecent(inst)
+    local p = X.pathOf(inst, true)
+    local i = table.find(X.recent, p)
+    if i then table.remove(X.recent, i) end
+    table.insert(X.recent, 1, p)
+    while #X.recent > 6 do table.remove(X.recent) end
+    X.pathCache[p] = { inst = inst, t = os.clock() }
+    X.dirty = true
+    E.saveSettings()
+end
+
+function X.togglePin(p, inst)
+    local i = table.find(X.pins, p)
+    if i then
+        table.remove(X.pins, i)
+    else
+        if #X.pins >= 12 then
+            notify("Favorit penuh (maks 12). Lepas salah satu dulu.", "warn")
+            return
+        end
+        X.pins[#X.pins + 1] = p
+    end
+    if inst then X.pathCache[p] = { inst = inst, t = os.clock() } end
+    E.saveSettings()
+    X.refresh(true)
+end
+
+-- buka semua induk objek supaya kelihatan di pohon
+function X.reveal(inst)
+    if not inGame(inst) then return end
+    local p, guard = inst.Parent, 0
+    while p and p ~= game and guard < 100 do
+        X.expanded[p] = true
+        p = p.Parent
+        guard = guard + 1
+    end
+end
+
+function X.toggle(inst)
+    if X.expanded[inst] then X.expanded[inst] = nil else X.expanded[inst] = true end
+    X.refresh(true)
+end
+
+function X.collapseAll()
+    X.expanded = setmetatable({}, { __mode = "k" })
+    X.refresh(true)
+end
+
+-- ---- bangun daftar baris (mode pohon / mode hasil pencarian) ----
+function X.build()
+    local rows = {}
+    local function head(text) rows[#rows + 1] = { kind = "head", text = text } end
+
+    X.pinSet = setmetatable({}, { __mode = "k" })
+    for _, p in ipairs(X.pins) do
+        local inst = X.lookup(p)
+        if inst then X.pinSet[inst] = p end
+    end
+
+    if X.query ~= "" then
+        if X.searching then
+            head("MENCARI '" .. X.query .. "' ...")
+        else
+            local txt = "HASIL: " .. #X.results
+            if X.searchTrunc then txt = txt .. " (dibatasi, persempit kata kunci)" end
+            if #X.results == 0 then txt = txt .. " - coba kata lain" end
+            head(txt)
+            for _, r in ipairs(X.results) do
+                if inGame(r.inst) then rows[#rows + 1] = r end
+            end
+        end
+        return rows
+    end
+
+    if #X.pins > 0 then
+        head("FAVORIT")
+        for _, p in ipairs(X.pins) do
+            rows[#rows + 1] = { kind = "path", path = p, inst = X.lookup(p), pinned = true }
+        end
+    end
+    if #X.recent > 0 then
+        head("TERAKHIR DIPAKAI")
+        for _, p in ipairs(X.recent) do
+            rows[#rows + 1] = { kind = "path", path = p, inst = X.lookup(p) }
+        end
+    end
+    head("EXPLORER (LIVE)")
+
+    local function walk(inst, depth)
+        rows[#rows + 1] = { kind = "node", inst = inst, depth = depth }
+        if X.expanded[inst] then
+            local kids = sortedKids(inst)
+            local cap = CONFIG.ExplorerMaxChildren
+            for i, c in ipairs(kids) do
+                if i > cap then
+                    rows[#rows + 1] = { kind = "more", depth = depth + 1, n = #kids - cap }
+                    break
+                end
+                walk(c, depth + 1)
+            end
+        end
+    end
+    for _, r in ipairs(X.roots()) do walk(r, 0) end
+    return rows
+end
+
+local function sameRows(a, b)
+    if #a ~= #b then return false end
+    for i = 1, #a do
+        local x, y = a[i], b[i]
+        if x.kind ~= y.kind or x.inst ~= y.inst or x.depth ~= y.depth or x.path ~= y.path
+            or x.text ~= y.text or x.n ~= y.n or x.pinned ~= y.pinned then
+            return false
+        end
+    end
+    return true
+end
+
+function X.refresh(force)
+    if not alive() then return end
+    X.dirty = false
+    local rows = X.build()
+    if force or not sameRows(rows, X.rows) then
+        X.rows = rows
+        X.stamp = os.date("%H:%M:%S")
+        fire("explorerView")
+    else
+        fire("explorerPaint")
+    end
+    local ok = E.getTarget() ~= nil
+    if ok ~= X.lastTargetOk then
+        X.lastTargetOk = ok
+        fire("target")
+    end
+end
+
+-- ---- pencarian (async, tidak membekukan game) ----
+function X.search(q, silent)
+    local terms = {}
+    for w in (q or ""):lower():gmatch("%S+") do terms[#terms + 1] = w end
+    if silent and X.searchBusy then return end
+    X.searchToken = X.searchToken + 1
+    local token = X.searchToken
+    if #terms == 0 then
+        X.results, X.searching, X.searchBusy, X.searchTrunc = {}, false, false, false
+        X.dirty = true
+        return
+    end
+    X.searchBusy = true
+    X.lastSearch = os.clock()
+    if not silent then
+        X.searching = true
+        X.dirty = true
+    end
+
+    task.spawn(function()
+        local found, visited, truncated = {}, 0, false
+        local stack = {}
+        local roots = X.roots()
+        for i = #roots, 1, -1 do stack[#stack + 1] = roots[i] end
+
+        while #stack > 0 do
+            if token ~= X.searchToken or not alive() then return end
+            local inst = table.remove(stack)
+            visited = visited + 1
+            local hay = inst.Name:lower() .. " " .. inst.ClassName:lower()
+            local okm = true
+            for _, t in ipairs(terms) do
+                if not hay:find(t, 1, true) then okm = false break end
+            end
+            if okm then
+                if #found >= CONFIG.ExplorerSearchResults then
+                    truncated = true
+                    break
+                end
+                found[#found + 1] = inst
+            end
+            if visited >= CONFIG.ExplorerSearchMax then
+                truncated = true
+                break
+            end
+            if not inst:IsA("Terrain") then
+                local list = kidsOf(inst)
+                for i = #list, 1, -1 do stack[#stack + 1] = list[i] end
+            end
+            if visited % 1500 == 0 then task.wait() end
+        end
+        if token ~= X.searchToken or not alive() then return end
+
+        table.sort(found, function(a, b)
+            local an, bn = a.Name:lower(), b.Name:lower()
+            if an ~= bn then return an < bn end
+            return a.ClassName < b.ClassName
+        end)
+        local res = {}
+        for _, inst in ipairs(found) do
+            local par = inst.Parent
+            res[#res + 1] = {
+                kind = "node", inst = inst, depth = 0, flat = true,
+                sub = inst.ClassName .. " | " .. ((par and par ~= game) and X.pathOf(par) or "game"),
+            }
+        end
+        X.results, X.searchTrunc = res, truncated
+        X.searching, X.searchBusy = false, false
+        X.refresh(true)
+    end)
+end
+
+-- dipanggil dari kolom cari (debounce 0.35 detik)
+function X.setQuery(text)
+    text = (text or ""):match("^%s*(.-)%s*$")
+    if text == X.query then return end
+    X.query = text
+    X.qToken = X.qToken + 1
+    local tok = X.qToken
+    if text == "" then
+        X.search("")
+        X.refresh(true)
+    else
+        X.searching = true
+        X.dirty = true
+        task.delay(0.35, function()
+            if tok == X.qToken and alive() then
+                X.search(text)
+                X.refresh(true)
+            end
+        end)
+    end
+end
+
+-- ---- live: dengarkan perubahan di seluruh game ----
+function X.hook()
+    if X.hooked then return end
+    X.hooked = true
+    local function touch(d)
+        if X.query ~= "" then
+            X.dirty, X.searchStale = true, true
+            return
+        end
+        local p = d.Parent
+        if p == game or X.expanded[p] then X.dirty = true end
+    end
+    local ok = pcall(function()
+        bind(game.DescendantAdded, touch)
+        bind(game.DescendantRemoving, touch)
+    end)
+    if not ok then
+        logLine("Explorer live: event DescendantAdded tidak tersedia, pakai polling tiap "
+            .. CONFIG.ExplorerRefresh .. " detik.", "warn")
+    end
+end
+
+-- UI memberi tahu engine kapan tab Explorer benar-benar terlihat
+function X.setActive(on)
+    on = on and true or false
+    if on == X.active then return end
+    X.active = on
+    if on then
+        X.hook()
+        X.reveal(E.getTarget())
+        X.dirty = true
+        task.spawn(X.refresh, true)
+    end
+end
+
+pcall(function() X.expanded[workspace] = true end)
+
+task.spawn(function()
+    local acc = 0
+    while alive() do
+        task.wait(0.5)
+        if X.active then
+            acc = acc + 0.5
+            if X.searchStale and X.query ~= "" and not X.searchBusy and os.clock() - X.lastSearch > 3 then
+                X.searchStale = false
+                X.search(X.query, true)
+            end
+            if X.dirty or acc >= CONFIG.ExplorerRefresh then
+                acc = 0
+                local ok, err = pcall(X.refresh)
+                if not ok then warn("[SLImporter] explorer: " .. tostring(err)) end
+            end
+        else
+            acc = 0
+        end
+    end
+end)
+
+-- ---- diagnosa: struktur GUI Explorer bawaan Studio Lite ----
+function E.scanExplorerGui()
+    local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then
+        notify("PlayerGui tidak ditemukan.", "err")
+        return
+    end
+    local lines = { "# Scan GUI Explorer Studio Lite", "PlaceId: " .. tostring(game.PlaceId), "", "== ScreenGui di PlayerGui" }
+    for _, g in ipairs(kidsOf(pg)) do
+        lines[#lines + 1] = string.format('%s "%s" (%d turunan)', g.ClassName, g.Name, #g:GetDescendants())
+    end
+    local function dump(inst, depth)
+        if depth > 3 then return end
+        for i, c in ipairs(kidsOf(inst)) do
+            if i > 12 then
+                lines[#lines + 1] = string.rep("  ", depth) .. "..."
+                break
+            end
+            lines[#lines + 1] = string.rep("  ", depth) .. describe(c)
+            dump(c, depth + 1)
+        end
+    end
+    local hits = 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d.Name:lower():find("explorer", 1, true) then
+            hits = hits + 1
+            if hits > 8 then break end
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "== " .. X.pathOf(d) .. "  [" .. d.ClassName .. "]"
+            dump(d, 1)
+        end
+    end
+    if hits == 0 then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "(tidak ada GUI bernama 'explorer' di PlayerGui)"
+    end
+    local report = table.concat(lines, "\n")
+    local saved
+    if writefile then
+        ensureFolder()
+        local p = CONFIG.Folder .. "/explorer_gui_dump.txt"
+        if pcall(writefile, p, report) then saved = p end
+    end
+    local clip = setclipboard or toclipboard
+    local copied = clip and pcall(clip, report)
+    logLine(report, "info")
+    notify(string.format("Scan GUI Explorer: %d GUI cocok.%s%s", hits,
+        saved and (" Disimpan: " .. saved .. ".") or "", copied and " Disalin ke clipboard." or ""), "info")
+end
+
 
 -- ---- Watcher latar belakang ----
 task.spawn(function()
@@ -1933,27 +2476,33 @@ local function buildGui()
     local PF = make("Frame", { Name = "Files", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, Pages)
     local PL = make("Frame", { Name = "Log", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
     local PS = make("Frame", { Name = "Settings", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
+    local PE = make("Frame", { Name = "Explorer", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
 
-    local tabDefs = { { "files", "Files", PF }, { "log", "Log", PL }, { "set", "Pengaturan", PS } }
+    local tabDefs = { { "files", "Files", PF }, { "explorer", "Explorer", PE }, { "log", "Log", PL },
+        { "set", "Pengaturan", PS } }
+    local curTab = "files"
+    local syncExplorer -- diisi di bagian halaman Explorer
     local tabBtns = {}
     local tabInd = make("Frame", {
-        Size = UDim2.new(1 / 3, -16, 0, 2), Position = UDim2.new(0, 8, 1, -2),
+        Size = UDim2.new(1 / #tabDefs, -16, 0, 2), Position = UDim2.new(0, 8, 1, -2),
         BackgroundColor3 = T.accent, BorderSizePixel = 0,
     }, TabBar)
     corner(tabInd, 1)
     local function setTab(id)
+        curTab = id
         for i, d in ipairs(tabDefs) do
             local on = d[1] == id
             d[3].Visible = on
             tabBtns[d[1]].TextColor3 = on and T.text or T.sub
             if on then
-                tween(tabInd, 0.15, { Position = UDim2.new((i - 1) / 3, 8, 1, -2) })
+                tween(tabInd, 0.15, { Position = UDim2.new((i - 1) / #tabDefs, 8, 1, -2) })
             end
         end
+        if syncExplorer then syncExplorer() end
     end
     for i, d in ipairs(tabDefs) do
         local tb = make("TextButton", {
-            Text = d[2], Size = UDim2.new(1 / 3, 0, 1, -2), Position = UDim2.new((i - 1) / 3, 0, 0, 0),
+            Text = d[2], Size = UDim2.new(1 / #tabDefs, 0, 1, -2), Position = UDim2.new((i - 1) / #tabDefs, 0, 0, 0),
             BackgroundTransparency = 1, TextColor3 = T.sub, Font = Enum.Font.GothamMedium, TextSize = 12,
             AutoButtonColor = false, BorderSizePixel = 0,
         }, TabBar)
@@ -2014,12 +2563,14 @@ local function buildGui()
     local function toggleMin()
         W.minimized = not W.minimized
         applyRect(true)
+        if syncExplorer then syncExplorer() end
     end
 
     local function toggleMax()
         if W.minimized then W.minimized = false end
         W.maxed = not W.maxed
         applyRect(true)
+        if syncExplorer then syncExplorer() end
     end
 
     local function showWindow()
@@ -2030,6 +2581,7 @@ local function buildGui()
         Main.Visible = true
         mainScale.Scale = 0.92
         tween(mainScale, 0.18, { Scale = 1 }, Enum.EasingStyle.Back)
+        if syncExplorer then syncExplorer() end
     end
 
     local function hideWindow()
@@ -2038,6 +2590,7 @@ local function buildGui()
         tween(mainScale, 0.12, { Scale = 0.92 })
         mini.Visible = true
         updateMini()
+        if syncExplorer then syncExplorer() end
         task.delay(0.12, function()
             if alive() and W.hidden then Main.Visible = false end
         end)
@@ -2415,7 +2968,9 @@ local function buildGui()
     local actionBar = make("Frame", {
         Position = UDim2.new(0, 8, 1, -38), Size = UDim2.new(1, -16, 0, 34), BackgroundTransparency = 1,
     }, PF)
-    local targetBtn = button(actionBar, "", T.panel2, { Size = UDim2.fromOffset(116, 34), TextSize = 11 })
+    local targetBtn = button(actionBar, "", T.panel2, {
+        Size = UDim2.fromOffset(116, 34), TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd,
+    })
     local scriptsBtn = button(actionBar, "", T.panel2, { Position = UDim2.fromOffset(122, 0), Size = UDim2.fromOffset(86, 34), TextSize = 11 })
     local undoBtn = button(actionBar, "Undo", T.panel2, { Position = UDim2.fromOffset(214, 0), Size = UDim2.fromOffset(60, 34), TextSize = 11 })
     local importBtn = button(actionBar, "Import", T.panel2, {
@@ -2424,7 +2979,9 @@ local function buildGui()
 
     local function paintAction()
         local n = E.selCount()
-        targetBtn.Text = "To: " .. TARGET_SHORT[S.target]
+        local tg = E.getTarget()
+        targetBtn.Text = "To: " .. (tg and tg.Name or "(hilang)")
+        targetBtn.TextColor3 = tg and T.text or T.warn
         scriptsBtn.Text = CONFIG.DisableScripts and "Script: OFF" or "Script: ON"
         scriptsBtn.BackgroundColor3 = CONFIG.DisableScripts and T.panel2 or Color3.fromRGB(150, 105, 35)
         undoBtn.Text = (#S.history > 0) and ("Undo (" .. #S.history .. ")") or "Undo"
@@ -2525,13 +3082,7 @@ local function buildGui()
 
     bind(targetBtn.MouseButton1Click, function()
         if S.busy then return end
-        local opts = {}
-        for _, t in ipairs(TARGETS) do opts[#opts + 1] = { text = t, value = t } end
-        dropdown(targetBtn, opts, S.target, function(v)
-            S.target = v
-            paintAction()
-            E.saveSettings()
-        end)
+        setTab("explorer") -- pilih target dari pohon Explorer live
     end)
     bind(scriptsBtn.MouseButton1Click, function()
         CONFIG.DisableScripts = not CONFIG.DisableScripts
@@ -2556,6 +3107,301 @@ local function buildGui()
     bind(detailBtn.MouseButton1Click, function()
         if S.focus and not S.busy then E.runBatch({ S.focus }) end
     end)
+
+    -- ===============================================================
+    -- Halaman EXPLORER (scan live -> pilih target import)
+    -- ===============================================================
+    local XR_H = ROW_H
+    local curTarget = nil
+
+    local xSearchRow = make("Frame", {
+        Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 28), BackgroundTransparency = 1,
+    }, PE)
+    local xsbox = make("Frame", {
+        Size = UDim2.new(1, -70, 1, 0), BackgroundColor3 = T.panel2, BorderSizePixel = 0,
+    }, xSearchRow)
+    corner(xsbox, 6)
+    local xsstroke = stroke(xsbox, T.line, 1)
+    local xSearch = make("TextBox", {
+        Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -36, 1, 0), BackgroundTransparency = 1,
+        Text = "", PlaceholderText = "Cari nama / class di Explorer...", PlaceholderColor3 = T.sub,
+        TextColor3 = T.text, Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, xsbox)
+    local xClear = make("TextButton", {
+        Text = "x", Size = UDim2.fromOffset(22, 22), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -3, 0.5, 0), BackgroundTransparency = 1, TextColor3 = T.sub,
+        Font = Enum.Font.GothamBold, TextSize = 13, Visible = false, BorderSizePixel = 0,
+    }, xsbox)
+    local xFold = button(xSearchRow, "Lipat", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(64, 28), TextSize = 11,
+    })
+
+    -- kartu target aktif
+    local xInfo = make("Frame", {
+        Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 32), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0,
+    }, PE)
+    corner(xInfo, 8)
+    local xTargetLbl = label(xInfo, {
+        Position = UDim2.fromOffset(10, 3), Size = UDim2.new(1, -134, 0, 15), Font = Enum.Font.GothamMedium,
+        TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd, Text = "",
+    })
+    local xStampLbl = label(xInfo, {
+        Position = UDim2.fromOffset(10, 18), Size = UDim2.new(1, -134, 0, 12), TextSize = 9,
+        TextColor3 = T.sub, TextTruncate = Enum.TextTruncate.AtEnd, Text = "",
+    })
+    local xPinBtn = button(xInfo, "Pin", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -66, 0.5, 0), Size = UDim2.fromOffset(52, 22), TextSize = 10,
+    })
+    local xBackBtn = button(xInfo, "Files", T.accent, {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), Size = UDim2.fromOffset(54, 22), TextSize = 10,
+    })
+
+    -- daftar pohon (virtual list)
+    local xList = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 74), Size = UDim2.new(1, -16, 1, -82), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, PE)
+    corner(xList, 8)
+    local xEmpty = label(xList, {
+        Position = UDim2.fromOffset(12, 12), Size = UDim2.fromOffset(280, 40), TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = T.sub, TextSize = 11,
+        Text = "Memindai Explorer...",
+    })
+
+    local xPool, xLastH = {}, -1
+
+    local function setRowLayout(row, depth, showArrow)
+        local indent = 4 + math.min(depth, 12) * 10
+        row.arrowBtn.Position = UDim2.fromOffset(indent, 0)
+        local nx = indent + (showArrow and 24 or 8)
+        row.name.Position = UDim2.fromOffset(nx, 3)
+        row.name.Size = UDim2.new(1, -(nx + 108), 0, 15)
+        row.sub.Position = UDim2.fromOffset(nx, 18)
+        row.sub.Size = UDim2.new(1, -(nx + 108), 0, 11)
+    end
+
+    local function paintXRow(row)
+        local r = row.r
+        if not r then return end
+        local f = row.frame
+        if r.kind == "head" then
+            f.BackgroundTransparency = 1
+            row.stroke.Transparency = 1
+            row.head.Visible, row.head.Text = true, r.text
+            row.arrowBtn.Visible, row.name.Visible, row.sub.Visible = false, false, false
+            row.badge.Visible, row.pin.Visible = false, false
+            return
+        end
+        f.BackgroundTransparency = 0
+        row.head.Visible = false
+        row.name.Visible, row.sub.Visible = true, true
+
+        if r.kind == "more" then
+            setRowLayout(row, r.depth, true)
+            f.BackgroundColor3 = T.row
+            row.stroke.Transparency = 1
+            row.name.Text = "+" .. r.n .. " item lainnya"
+            row.name.TextColor3 = T.sub
+            row.sub.Text = "Pakai kolom cari untuk menemukannya"
+            row.arrowBtn.Visible, row.badge.Visible, row.pin.Visible = false, false, false
+            return
+        end
+
+        local inst = r.inst
+        local present = inst ~= nil and inGame(inst)
+        local isT = present and inst == curTarget
+        local pinned, showArrow = false, false
+
+        if r.kind == "path" then
+            pinned = table.find(X.pins, r.path) ~= nil
+            setRowLayout(row, 0, false)
+            row.name.Text = present and inst.Name or (r.path:match("[^/]+$") or r.path)
+            row.sub.Text = present and X.pathOf(inst) or ("tidak ditemukan | " .. r.path)
+        else
+            pinned = present and X.pinSet[inst] ~= nil
+            setRowLayout(row, r.depth or 0, not r.flat)
+            row.name.Text = present and inst.Name or "(dihapus)"
+            if not present then
+                row.sub.Text = ""
+            elseif r.flat then
+                row.sub.Text = r.sub or inst.ClassName
+            else
+                local n = X.kidCount(inst)
+                row.sub.Text = inst.ClassName .. (n > 0 and (" | " .. n .. " anak") or "")
+                showArrow = n > 0
+                if showArrow then row.arrow.Rotation = X.expanded[inst] and 90 or 0 end
+            end
+        end
+
+        row.arrowBtn.Visible = showArrow
+        row.name.TextColor3 = present and (isT and T.okText or T.text) or T.sub
+        f.BackgroundColor3 = isT and T.rowSel or T.row
+        row.stroke.Transparency = isT and 0 or 1
+        row.badge.Visible = isT
+        row.pin.Visible = present or pinned
+        row.pin.Text = pinned and "UNPIN" or "PIN"
+        row.pin.BackgroundColor3 = pinned and Color3.fromRGB(150, 105, 35) or T.panel2
+    end
+
+    local function makeXRow()
+        local row = {}
+        local f = make("TextButton", {
+            Text = "", AutoButtonColor = false, Size = UDim2.new(1, -10, 0, XR_H - 4),
+            BackgroundColor3 = T.row, BorderSizePixel = 0, Visible = false,
+        }, xList)
+        corner(f, 6)
+        row.frame = f
+        row.stroke = stroke(f, T.accent, 1, 1)
+        row.head = label(f, {
+            Position = UDim2.fromOffset(6, 0), Size = UDim2.new(1, -12, 1, 0), Font = Enum.Font.GothamBold,
+            TextSize = 10, TextColor3 = T.sub, Visible = false, TextTruncate = Enum.TextTruncate.AtEnd,
+        })
+        row.arrowBtn = make("TextButton", {
+            Text = "", BackgroundTransparency = 1, Size = UDim2.fromOffset(22, XR_H - 4),
+            BorderSizePixel = 0, Visible = false,
+        }, f)
+        row.arrow = label(row.arrowBtn, {
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14),
+            Text = ">", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = T.sub,
+            TextXAlignment = Enum.TextXAlignment.Center,
+        })
+        row.name = label(f, {
+            Font = Enum.Font.GothamMedium, TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+            Size = UDim2.new(1, -120, 0, 15),
+        })
+        row.sub = label(f, {
+            TextSize = 10, TextColor3 = T.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+            Size = UDim2.new(1, -120, 0, 11),
+        })
+        row.badge = label(f, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -52, 0.5, 0), Size = UDim2.fromOffset(50, 16),
+            BackgroundTransparency = 0, BackgroundColor3 = T.accent, Text = "TARGET", Font = Enum.Font.GothamBold,
+            TextSize = 9, TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = T.white, Visible = false,
+        })
+        corner(row.badge, 4)
+        row.pin = button(f, "PIN", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), Size = UDim2.fromOffset(40, 20),
+            TextSize = 9, Visible = false,
+        })
+
+        bind(f.MouseButton1Click, function()
+            local r = row.r
+            if not r then return end
+            if r.kind == "more" then
+                setStatus("Terlalu banyak anak di cabang ini, pakai kolom cari.", "info")
+            elseif r.kind == "node" or r.kind == "path" then
+                if r.inst and inGame(r.inst) then
+                    E.setTarget(r.inst)
+                else
+                    setStatus("Objek ini sudah tidak ada di game.", "warn")
+                end
+            end
+        end)
+        bind(row.arrowBtn.MouseButton1Click, function()
+            local r = row.r
+            if r and r.kind == "node" and r.inst then X.toggle(r.inst) end
+        end)
+        bind(row.pin.MouseButton1Click, function()
+            local r = row.r
+            if not r then return end
+            if r.kind == "path" then
+                X.togglePin(r.path, r.inst)
+            elseif r.kind == "node" and r.inst and inGame(r.inst) then
+                X.togglePin(X.pinSet[r.inst] or X.pathOf(r.inst, true), r.inst)
+            end
+        end)
+        return row
+    end
+
+    local function renderX()
+        local rows = X.rows
+        local n = #rows
+        local canvasH = n * XR_H + 6
+        if canvasH ~= xLastH then
+            xLastH = canvasH
+            xList.CanvasSize = UDim2.new(0, 0, 0, canvasH)
+        end
+        local need = math.ceil(math.max(xList.AbsoluteSize.Y, 60) / XR_H) + 3
+        while #xPool < need do xPool[#xPool + 1] = makeXRow() end
+        curTarget = E.getTarget()
+        local first = math.max(1, math.floor(xList.CanvasPosition.Y / XR_H) + 1)
+        for i, row in ipairs(xPool) do
+            local r = rows[first + i - 1]
+            if r then
+                row.r = r
+                row.frame.Position = UDim2.fromOffset(4, (first + i - 2) * XR_H + 3)
+                row.frame.Visible = true
+                paintXRow(row)
+            else
+                row.r = nil
+                row.frame.Visible = false
+            end
+        end
+        xEmpty.Visible = n == 0
+    end
+
+    local function refreshX()
+        curTarget = E.getTarget()
+        for _, row in ipairs(xPool) do
+            if row.r then paintXRow(row) end
+        end
+    end
+
+    local function paintXInfo()
+        local t = E.getTarget()
+        if t then
+            local pinned = X.pinSet[t] ~= nil
+            xTargetLbl.Text = "Target: " .. X.pathOf(t)
+            xTargetLbl.TextColor3 = T.okText
+            xPinBtn.Text = pinned and "Unpin" or "Pin"
+            xPinBtn.BackgroundColor3 = pinned and Color3.fromRGB(150, 105, 35) or T.panel2
+        else
+            xTargetLbl.Text = "Target hilang: " .. S.target
+            xTargetLbl.TextColor3 = T.warn
+            xPinBtn.Text = "Pin"
+            xPinBtn.BackgroundColor3 = T.panel2
+        end
+        if X.searching then
+            xStampLbl.Text = "mencari di seluruh Explorer..."
+        elseif X.query ~= "" then
+            xStampLbl.Text = "hasil pencarian | live update " .. X.stamp
+        else
+            xStampLbl.Text = "live | update " .. X.stamp .. " | " .. #X.rows .. " baris"
+        end
+    end
+
+    syncExplorer = function()
+        local on = curTab == "explorer" and not W.hidden and not W.minimized
+        X.setActive(on)
+        if on then
+            renderX()
+            paintXInfo()
+        end
+    end
+
+    bind(xList:GetPropertyChangedSignal("CanvasPosition"), renderX)
+    bind(xList:GetPropertyChangedSignal("AbsoluteSize"), renderX)
+    bind(xSearch:GetPropertyChangedSignal("Text"), function()
+        xClear.Visible = xSearch.Text ~= ""
+        X.setQuery(xSearch.Text)
+    end)
+    bind(xSearch.Focused, function() tween(xsstroke, 0.12, { Color = T.accent }) end)
+    bind(xSearch.FocusLost, function() tween(xsstroke, 0.12, { Color = T.line }) end)
+    bind(xClear.MouseButton1Click, function() xSearch.Text = "" end)
+    bind(xFold.MouseButton1Click, function() X.collapseAll() end)
+    bind(xBackBtn.MouseButton1Click, function() setTab("files") end)
+    bind(xPinBtn.MouseButton1Click, function()
+        local t = E.getTarget()
+        if t then
+            X.togglePin(X.pinSet[t] or X.pathOf(t, true), t)
+        else
+            setStatus("Belum ada target valid untuk di-pin.", "warn")
+        end
+    end)
+
 
     -- ===============================================================
     -- Halaman LOG
@@ -2719,15 +3565,20 @@ local function buildGui()
     switchRow("Auto-rescan", "Pindai ulang tiap " .. CONFIG.AutoScanInterval .. " detik di latar belakang, juga saat UI disembunyikan.", "AutoScan")
     switchRow("Auto-import file baru", "File baru di folder " .. CONFIG.Folder .. " langsung diimport ke target (hati-hati).", "AutoImportNew")
 
+    section("Explorer")
+    switchRow("Semua service", "Tampilkan semua service di pohon Explorer, bukan hanya yang umum dipakai Studio Lite.",
+        "ExplorerAllServices", function() X.refresh(true) end)
+
     section("Import")
     switchRow("Matikan script", "Script di dalam file di-set Disabled saat diimport.", "DisableScripts")
     switchRow("Pasang teks script", "Isi script ditulis ke editor bawaan Studio Lite (SL_CodeTextBox).", "InstallScriptText")
-    switchRow("Taruh di depan kamera", "Hanya untuk target Workspace. Batch otomatis diberi jarak.", "SpawnInFrontOfCamera")
+    switchRow("Taruh di depan kamera", "Untuk target di dalam Workspace. Batch otomatis diberi jarak.", "SpawnInFrontOfCamera")
     switchRow("Sembunyikan UI setelah import", "UI menutup ke tombol SL kecil, hasilnya muncul sebagai notifikasi.", "AutoHideAfterImport")
 
     section("Alat")
     actionRow("Scan ulang sekarang", T.purple, function() E.rescan(false) end)
     actionRow("Scan struktur script Studio Lite (diagnosa)", T.panel2, E.scanStudioLite)
+    actionRow("Scan GUI Explorer Studio Lite (diagnosa)", T.panel2, E.scanExplorerGui)
     actionRow("Salin script berikutnya dari import terakhir", T.panel2, E.copyNextScript)
     actionRow("Undo semua batch", Color3.fromRGB(150, 90, 50), function() E.undo(true) end)
     actionRow("Reset centang & status", T.panel2, function()
@@ -2808,11 +3659,25 @@ local function buildGui()
     H.settingsRefresh = function()
         for _, f in ipairs(refreshers) do f() end
     end
+    H.explorerView = function()
+        renderX()
+        paintXInfo()
+    end
+    H.explorerPaint = function()
+        refreshX()
+        paintXInfo()
+    end
+    H.target = function()
+        paintAction()
+        refreshX()
+        paintXInfo()
+    end
 
     -- ---- Mulai ----
     paintChips()
     paintAction()
     paintDetail()
+    paintXInfo()
     setTab("files")
     applyRect(false)
     relayoutFiles()
