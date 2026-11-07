@@ -1,52 +1,68 @@
 --[[
-    Studio Lite RBXM/RBXMX Importer v2  (Delta executor)
+    Studio Lite RBXM/RBXMX Importer v3 Pro  (Delta executor)
     Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
 
     Cara pakai
-      1. Taruh file .rbxm / .rbxmx di folder Delta:  <Delta>/Workspace/StudioLiteImports/
-         (folder dibuat otomatis saat script pertama kali dijalankan)
-      2. Masuk ke Studio Lite, execute script ini lewat Delta
-      3. Pilih file di GUI, pilih target, tekan Import
+      1. Taruh file .rbxm / .rbxmx di mana saja di folder workspace Delta
+         (disarankan: <Delta>/Workspace/StudioLiteImports/, dibuat otomatis).
+      2. Masuk ke Studio Lite, execute script ini lewat Delta.
+      3. Cari / centang satu atau banyak file, pilih target, tekan Import.
 
-    Yang baru di v2 (teks script ikut masuk)
-      - Penyebab teks kosong: editor Studio Lite tidak membaca Script.Source. Teks disimpan
-        di TextBox "SL_CodeTextBox" (anak dari script) + penampung "SaveChangesTo".
-        Script buatan Instance.new() tidak punya struktur itu, jadi editornya kosong.
-      - Sekarang tiap Script / LocalScript / ModuleScript hasil import diberi struktur editor
-        yang di-clone dari script bawaan Studio Lite, lalu diisi teks aslinya.
-      - Teks diambil langsung dari ISI FILE: parser rbxmx (XML) dan parser rbxm biner
-        (chunk INST/PROP/PRNT + LZ4) bawaan script ini. Tidak butuh decompile atau
-        Script.Source, jadi rbxm biner pun lengkap.
-      - Tombol "Scan" mencatat struktur script bawaan Studio Lite ke
-        StudioLiteImports/scan_studio_lite.txt (juga disalin ke clipboard). Kalau teks
-        masih kosong setelah import, kirim isi file itu untuk disesuaikan.
-      - Setiap import menulis StudioLiteImports/import_log.txt (hasil per script).
-      - Script yang gagal dipasang otomatis masih bisa disalin lewat tombol "Salin script"
-        atau diambil dari folder scripts_out.
+    Baru di v3 Pro
+      - Scanner rekursif: semua file .rbxm / .rbxmx di seluruh workspace executor
+        (subfolder ikut) atau hanya folder import. Auto-rescan di latar belakang.
+      - Daftar file virtual (ringan walau ratusan file) + kolom pencarian multi-kata,
+        filter format, urutan, centang banyak, "Pilih semua" (sesuai hasil filter).
+      - Batch import berurutan dengan progress bar, tombol Batal, dan Undo per batch.
+        Model hasil batch otomatis diberi jarak supaya tidak menumpuk.
+      - Panel detail: format, ukuran, jumlah objek & script, root class.
+      - Jendela bisa dikecilkan (minimize), dibesarkan (maximize), di-resize lewat
+        pegangan pojok kanan-bawah, dan di-drag. Tombol X hanya MENYEMBUNYIKAN UI:
+        scanner, antrean import, dan auto-rescan tetap jalan, tombol kecil "SL"
+        muncul untuk membuka lagi (atau tekan RightControl di PC).
+      - Tab Log (riwayat proses) dan tab Pengaturan (tersimpan otomatis).
+      - Opsi "Auto-import file baru" untuk folder import (default mati).
 
-    Cara kerja loader
+    Cara kerja loader (tidak berubah dari v2)
       - Jalur utama : game:GetObjects(getcustomasset(path))  -> mendukung .rbxm dan .rbxmx
       - Fallback    : parser rbxmx bawaan (XML) kalau getcustomasset tidak tersedia.
                       rbxm biner TIDAK bisa lewat fallback; simpan ulang sebagai .rbxmx.
-                      Fallback XML tidak membawa Attributes / Tags / properti langka.
+      - Teks script dibaca langsung dari isi file (XML & biner) lalu dipasang ke struktur
+        editor bawaan Studio Lite (SL_CodeTextBox + SaveChangesTo).
 
     Catatan
-      - Objek dibuat di sisi client. Dari dump game, proses Save Studio Lite membaca workspace
-        lokal (CloneLocal -> Convert -> kirim ke server), jadi hasil import yang tampil di
-        Explorer seharusnya ikut tersimpan. Cek sekali dengan Save lalu Open.
+      - Objek dibuat di sisi client; Save Studio Lite membaca workspace lokal.
       - Script di dalam file dimatikan (Disabled = true) secara default.
-      - Struktur editor diambil dari script bawaan di game. Kalau tidak ada satu pun yang
-        terbaca (belum pernah insert script), insert satu script lewat menu Studio Lite
-        dulu lalu import ulang.
+      - Kalau tidak ada script bawaan Studio Lite yang terbaca, insert satu script lewat
+        menu Studio Lite dulu lalu import ulang.
 ]]
 
 local CONFIG = {
     Folder = "StudioLiteImports",
+    SettingsFile = "StudioLiteImports/ui_settings.json",
+
+    -- opsi yang bisa diubah dari tab Pengaturan (tersimpan otomatis)
     DisableScripts = true,
     SpawnInFrontOfCamera = true,
-    InstallScriptText = true,   -- pasang teks script ke editor Studio Lite
+    InstallScriptText = true,    -- pasang teks script ke editor Studio Lite
+    AutoScan = true,             -- rescan berkala di latar belakang
+    ScanScope = "all",           -- "all" = seluruh workspace executor, "folder" = hanya Folder
+    AutoImportNew = false,       -- import otomatis file BARU yang muncul di Folder
+    AutoHideAfterImport = false, -- sembunyikan UI setelah batch selesai
+
+    -- tuning scanner
+    AutoScanInterval = 6,        -- detik
+    MaxDepth = 8,
+    MaxEntries = 8000,
+    InspectMaxBytes = 6 * 1024 * 1024,
+    SkipFolders = { scripts_out = true, [".git"] = true, node_modules = true },
+
+    ToggleKey = Enum.KeyCode.RightControl,
     StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true },
 }
+
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -554,20 +570,134 @@ local function ensureFolder()
     end
 end
 
-local function listImportFiles()
-    local out = {}
-    if not listfiles then return out, "executor ini tidak punya listfiles, ketik nama file manual" end
-    ensureFolder()
-    local ok, files = pcall(listfiles, CONFIG.Folder)
-    if not ok then return out, "gagal baca folder: " .. tostring(files) end
-    for _, f in ipairs(files) do
-        local low = f:lower()
-        if low:sub(-5) == ".rbxm" or low:sub(-6) == ".rbxmx" then
-            out[#out + 1] = f
+
+-- ===== Scanner pintar: rekursif, semua .rbxm / .rbxmx =====
+
+local function normPath(p)
+    p = tostring(p):gsub("\\", "/")
+    p = p:gsub("^%./", "")
+    return p
+end
+
+local function splitPath(path)
+    local dir, name = path:match("^(.*)/([^/]+)$")
+    if not dir then return "", path end
+    return dir, name
+end
+
+local function extOf(name)
+    local low = name:lower()
+    if low:sub(-6) == ".rbxmx" then return "rbxmx" end
+    if low:sub(-5) == ".rbxm" then return "rbxm" end
+    return nil
+end
+
+local function isDir(p)
+    if not isfolder then return false end
+    local ok, r = pcall(isfolder, p)
+    return ok and r == true
+end
+
+local function makeEntry(raw)
+    local path = normPath(raw)
+    local dir, name = splitPath(path)
+    local ext = extOf(name)
+    if not ext then return nil end
+    local base = name:gsub("%.[^.]+$", "")
+    return {
+        raw = raw, path = path, name = name, base = base, dir = dir, ext = ext,
+        lname = name:lower(), ldir = dir:lower(), lower = (name .. " " .. dir):lower(),
+    }
+end
+
+-- return: list entri, info { visited, truncated, err }
+local function scanFiles(scope, yieldFn)
+    local out, seen = {}, {}
+    local info = { visited = 0, truncated = false }
+    if not listfiles then
+        info.err = "executor ini tidak punya listfiles (ketik path file di kolom cari lalu Enter)"
+        return out, info
+    end
+
+    local function walk(dir, depth)
+        local ok, items = pcall(listfiles, dir)
+        if not ok or type(items) ~= "table" then return false end
+        for _, raw in ipairs(items) do
+            info.visited = info.visited + 1
+            if info.visited > CONFIG.MaxEntries then
+                info.truncated = true
+                return true
+            end
+            if yieldFn and info.visited % 60 == 0 then yieldFn() end
+            local entry = makeEntry(raw)
+            if entry then
+                if not seen[entry.path] then
+                    seen[entry.path] = true
+                    out[#out + 1] = entry
+                end
+            elseif depth < CONFIG.MaxDepth and isDir(raw) then
+                local _, folderName = splitPath(normPath(raw))
+                if not CONFIG.SkipFolders[folderName:lower()] then
+                    walk(raw, depth + 1)
+                    if info.truncated then return true end
+                end
+            end
+        end
+        return true
+    end
+
+    if scope == "all" then
+        local ok = walk(".", 0)
+        if not ok then ok = walk("", 0) end
+        if not ok then
+            info.err = "gagal membaca workspace executor"
+            scope = "folder"
         end
     end
-    table.sort(out)
-    return out
+    if scope == "folder" then
+        ensureFolder()
+        if not walk(CONFIG.Folder, 0) and not info.err then
+            info.err = "gagal membaca folder " .. CONFIG.Folder
+        end
+    end
+    return out, info
+end
+
+-- ===== Inspeksi ringan (format, ukuran, jumlah objek & script) =====
+
+local function countTree(nodes)
+    local objs, scripts = 0, 0
+    local function walk(list)
+        for _, n in ipairs(list) do
+            objs = objs + 1
+            if SCRIPT_CLASSES[n.class] then scripts = scripts + 1 end
+            walk(n.children)
+        end
+    end
+    walk(nodes)
+    return objs, scripts
+end
+
+local function inspectFile(entry)
+    if not readfile then return nil, "readfile tidak tersedia" end
+    local ok, data = pcall(readfile, entry.raw)
+    if not ok or type(data) ~= "string" then return nil, "file tidak bisa dibaca" end
+    local info = { size = #data }
+    info.binary = data:sub(1, 8) == "<roblox!"
+    info.format = info.binary and "RBXM biner" or "RBXMX (XML)"
+    if #data > CONFIG.InspectMaxBytes then
+        info.skipped = true
+        return info
+    end
+    local okp, roots = pcall(parseTree, data)
+    if okp and type(roots) == "table" and roots[1] then
+        info.objects, info.scripts = countTree(roots)
+        info.roots = #roots
+        info.rootClass, info.rootName = roots[1].class, roots[1].name
+    else
+        info.parseErr = tostring(roots)
+    end
+    return info
 end
 
 -- return: objs, cara, isi file (string / nil)
@@ -676,13 +806,28 @@ local function sanitize(obj)
     end
 end
 
-local function placeInFront(obj)
+
+-- Taruh di depan kamera. state.offset dipakai batch import supaya tiap file
+-- digeser ke samping (RightVector) sesuai ukurannya dan tidak menumpuk.
+local function placeInFront(obj, state)
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local target = cam.CFrame.Position + cam.CFrame.LookVector * 25
+    state = state or { offset = 0 }
+    local size = 8
+    if obj:IsA("Model") then
+        local ok, s = pcall(function() return obj:GetExtentsSize() end)
+        if ok and s then size = math.max(s.X, s.Z, 2) end
+    elseif obj:IsA("BasePart") then
+        size = math.max(obj.Size.X, obj.Size.Z, 2)
+    else
+        return
+    end
+    local cf = cam.CFrame
+    local target = cf.Position + cf.LookVector * 25 + cf.RightVector * (state.offset + size / 2)
+    state.offset = state.offset + size + 4
     if obj:IsA("Model") then
         pcall(function() obj:PivotTo(CFrame.new(target)) end)
-    elseif obj:IsA("BasePart") then
+    else
         pcall(function() obj.Position = target end)
     end
 end
@@ -984,405 +1129,1707 @@ local function scanNative()
     return msg
 end
 
--- Catat hasil import per script (buat cek kalau ada yang gagal)
-local function writeImportLog(path, scripts, stats, parseErr)
-    if not writefile then return nil end
-    local lines = { "# Import log: " .. displayName(path), "script: " .. #scripts }
-    if parseErr then lines[#lines + 1] = "peringatan baca file: " .. parseErr end
-    for i, s in ipairs(scripts) do
-        lines[#lines + 1] = string.format("[%d] %s (%s) %d byte -> %s",
-            i, s.path, s.class, #s.source, tostring(stats.notes[i] or "teks tidak dipasang"))
-    end
-    local p = CONFIG.Folder .. "/import_log.txt"
-    if pcall(writefile, p, table.concat(lines, "\n")) then return p end
-    return nil
-end
+
+-- ===================================================================
+-- ENGINE (jalan terus walau UI disembunyikan)
+-- ===================================================================
 
 local TARGETS = { "Workspace", "ReplicatedStorage", "StarterGui", "StarterPack", "Lighting" }
-local targetIndex = 1
-local lastImported = {}
-local scriptList = {}
-local scriptIdx = 0
+local TARGET_SHORT = {
+    Workspace = "Workspace", ReplicatedStorage = "ReplStorage",
+    StarterGui = "StarterGui", StarterPack = "StarterPack", Lighting = "Lighting",
+}
+local SORTS = { "name", "name_desc", "folder", "format" }
+local SORT_LABEL = { name = "Nama A-Z", name_desc = "Nama Z-A", folder = "Folder", format = "Format" }
 
-local function doImport(path)
+local env = (getgenv and getgenv()) or _G
+if env.__SLImporterCleanup then pcall(env.__SLImporterCleanup) end
+if env.__SLImporterGui then pcall(function() env.__SLImporterGui:Destroy() end) end -- sisa v2
+local runId = {}
+env.__SLImporterRun = runId
+local function alive() return env.__SLImporterRun == runId end
+
+local conns = {}
+local function bind(signal, fn)
+    local c = signal:Connect(fn)
+    conns[#conns + 1] = c
+    return c
+end
+
+local S = {
+    entries = {}, view = {}, selected = {}, status = {}, reason = {}, known = {},
+    history = {}, log = {}, scriptList = {}, scriptIdx = 0,
+    busy = false, cancel = false, scanning = false, firstScan = false,
+    target = "Workspace", filter = "all", sort = "name", query = "",
+    focus = nil, infoCache = {}, sig = "", counts = { all = 0, rbxm = 0, rbxmx = 0 },
+    ui = {},
+}
+local E = {}
+
+-- UI mendaftarkan callback di sini; engine hanya memanggil lewat fire()
+local H = {}
+local function fire(name, ...)
+    local f = H[name]
+    if f then
+        local ok, err = pcall(f, ...)
+        if not ok then warn("[SLImporter] hook " .. name .. ": " .. tostring(err)) end
+    end
+end
+
+local function logLine(text, kind)
+    local line = { t = os.date("%H:%M:%S"), text = tostring(text), kind = kind or "info" }
+    S.log[#S.log + 1] = line
+    if #S.log > 300 then table.remove(S.log, 1) end
+    fire("log", line)
+end
+
+local function setStatus(text, kind)
+    fire("status", text, kind or "info")
+end
+
+local function notify(text, kind)
+    logLine(text, kind)
+    setStatus(text, kind)
+    fire("toast", text, kind or "info")
+end
+
+local function fmtBytes(n)
+    if n < 1024 then return n .. " B" end
+    if n < 1048576 then return string.format("%.1f KB", n / 1024) end
+    return string.format("%.2f MB", n / 1048576)
+end
+
+-- ---- Pengaturan tersimpan ----
+local PERSIST = { "DisableScripts", "SpawnInFrontOfCamera", "InstallScriptText", "AutoScan",
+    "ScanScope", "AutoImportNew", "AutoHideAfterImport" }
+
+function E.loadSettings()
+    if not (isfile and readfile) then return end
+    local ok, raw = pcall(function()
+        if isfile(CONFIG.SettingsFile) then return readfile(CONFIG.SettingsFile) end
+    end)
+    if not ok or type(raw) ~= "string" then return end
+    local okj, t = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not okj or type(t) ~= "table" then return end
+    for _, k in ipairs(PERSIST) do
+        if t[k] ~= nil then CONFIG[k] = t[k] end
+    end
+    if CONFIG.ScanScope ~= "all" and CONFIG.ScanScope ~= "folder" then CONFIG.ScanScope = "all" end
+    if table.find(TARGETS, t.target) then S.target = t.target end
+    if table.find(SORTS, t.sort) then S.sort = t.sort end
+    if t.filter == "all" or t.filter == "rbxm" or t.filter == "rbxmx" then S.filter = t.filter end
+    if type(t.ui) == "table" then S.ui = t.ui end
+end
+
+local saveQueued = false
+function E.saveSettings()
+    if not (writefile and alive()) or saveQueued then return end
+    saveQueued = true
+    task.delay(1, function()
+        saveQueued = false
+        local data = { target = S.target, sort = S.sort, filter = S.filter, ui = S.ui }
+        for _, k in ipairs(PERSIST) do data[k] = CONFIG[k] end
+        local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
+        if ok then
+            ensureFolder()
+            pcall(writefile, CONFIG.SettingsFile, json)
+        end
+    end)
+end
+
+-- ---- Daftar / filter / urutan ----
+local function sortList(list, mode)
+    table.sort(list, function(a, b)
+        if mode == "name_desc" then
+            if a.lname ~= b.lname then return a.lname > b.lname end
+        elseif mode == "folder" then
+            if a.ldir ~= b.ldir then return a.ldir < b.ldir end
+            if a.lname ~= b.lname then return a.lname < b.lname end
+        elseif mode == "format" then
+            if a.ext ~= b.ext then return a.ext < b.ext end
+            if a.lname ~= b.lname then return a.lname < b.lname end
+        else
+            if a.lname ~= b.lname then return a.lname < b.lname end
+        end
+        return a.path < b.path
+    end)
+end
+
+function E.applyView()
+    local terms = {}
+    for w in S.query:lower():gmatch("%S+") do terms[#terms + 1] = w end
+    local v = {}
+    local counts = { all = 0, rbxm = 0, rbxmx = 0 }
+    for _, e in ipairs(S.entries) do
+        local okm = true
+        for _, t in ipairs(terms) do
+            if not e.lower:find(t, 1, true) then okm = false break end
+        end
+        if okm then
+            counts.all = counts.all + 1
+            counts[e.ext] = counts[e.ext] + 1
+            if S.filter == "all" or S.filter == e.ext then v[#v + 1] = e end
+        end
+    end
+    sortList(v, S.sort)
+    S.view, S.counts = v, counts
+    fire("view")
+end
+
+function E.selCount()
+    local n = 0
+    for _ in pairs(S.selected) do n = n + 1 end
+    return n
+end
+
+function E.selectedList()
+    local l = {}
+    for _, e in ipairs(S.entries) do
+        if S.selected[e.path] then l[#l + 1] = e end
+    end
+    return l
+end
+
+function E.toggle(e)
+    if S.busy then return end
+    S.selected[e.path] = (not S.selected[e.path]) or nil
+    fire("selection")
+end
+
+function E.selectView()
+    if S.busy then return end
+    for _, e in ipairs(S.view) do S.selected[e.path] = true end
+    fire("selection")
+end
+
+function E.clearSel()
+    if S.busy then return end
+    S.selected = {}
+    fire("selection")
+end
+
+function E.setFocus(e)
+    S.focus = e
+    fire("focus")
+    if e and not S.infoCache[e.path] then
+        task.spawn(function()
+            local info, err = inspectFile(e)
+            S.infoCache[e.path] = info or { err = err }
+            if S.focus == e then fire("focus") end
+        end)
+    end
+end
+
+-- ---- Scan ----
+local function rescan(silent)
+    if S.scanning or not alive() then return end
+    S.scanning = true
+    fire("scanning", true)
+    local okS, entries, info = pcall(scanFiles, CONFIG.ScanScope, function() task.wait() end)
+    if not okS then
+        S.scanning = false
+        fire("scanning", false)
+        notify("Scan error: " .. tostring(entries), "err")
+        return
+    end
+
+    sortList(entries, "name")
+    local paths, alive_, fresh = {}, {}, {}
+    for i, e in ipairs(entries) do
+        paths[i] = e.path
+        alive_[e.path] = true
+        if S.firstScan and not S.known[e.path] then fresh[#fresh + 1] = e end
+    end
+    local sig = #entries .. ":" .. table.concat(paths, "|")
+    local changed = sig ~= S.sig
+    if changed then
+        S.sig = sig
+        S.entries = entries
+        for p in pairs(S.selected) do if not alive_[p] then S.selected[p] = nil end end
+        for p in pairs(S.status) do if not alive_[p] then S.status[p] = nil end end
+        for _, e in ipairs(entries) do S.known[e.path] = true end
+        if S.focus and not alive_[S.focus.path] then S.focus = nil end
+        E.applyView()
+        fire("selection")
+        fire("focus")
+    end
+    S.scanning = false
+    fire("scanning", false)
+
+    if info.err then
+        notify(info.err, "err")
+    elseif not silent or (changed and S.firstScan) then
+        local msg
+        if #fresh > 0 and silent then
+            msg = string.format("%d file baru terdeteksi (total %d)", #fresh, #entries)
+        else
+            msg = string.format("Scan selesai: %d file .rbxm/.rbxmx", #entries)
+            if info.truncated then msg = msg .. " (dibatasi " .. CONFIG.MaxEntries .. " entri)" end
+        end
+        if not silent or #fresh > 0 then notify(msg, "ok") else setStatus(msg, "info") end
+    end
+    S.firstScan = true
+
+    -- auto-import file baru dari folder import
+    if CONFIG.AutoImportNew and #fresh > 0 and not S.busy then
+        local pick = {}
+        for _, e in ipairs(fresh) do
+            if e.path:sub(1, #CONFIG.Folder + 1) == CONFIG.Folder .. "/" then pick[#pick + 1] = e end
+        end
+        if #pick > 0 then E.runBatch(pick) end
+    end
+end
+
+function E.rescan(silent) task.spawn(rescan, silent) end
+
+-- ---- Import satu file ----
+-- return: ok, pesan, objek yang ditambahkan, daftar script
+local function doImport(path, opts, placeState)
     local objs, how, data = loadFile(path)
     if not objs then return false, how end
 
-    local parseErr
-    scriptList, parseErr = gatherScripts(data, objs)
-    scriptIdx = 0
-    local outDir = exportScripts(path, scriptList)
+    local scripts, parseErr = gatherScripts(data, objs)
+    local outDir = exportScripts(path, scripts)
 
-    -- pasang teks script SEBELUM objek dimasukkan ke game (struktur editor Studio Lite)
+    -- pasang teks script SEBELUM objek masuk ke game (struktur editor Studio Lite)
     local stats = { ok = 0, fail = 0, notes = {} }
-    if CONFIG.InstallScriptText and #scriptList > 0 then
-        local oki, res = pcall(installScriptText, scriptList)
+    if CONFIG.InstallScriptText and #scripts > 0 then
+        local oki, res = pcall(installScriptText, scripts)
         if oki then
             stats = res
         else
-            stats.fail = #scriptList
+            stats.fail = #scripts
             stats.firstReason = tostring(res)
         end
     end
 
-    local target = game:GetService(TARGETS[targetIndex])
+    local target = game:GetService(opts.target)
     local added = {}
     for _, obj in ipairs(objs) do
         sanitize(obj)
         if target == workspace and CONFIG.SpawnInFrontOfCamera then
-            placeInFront(obj)
+            placeInFront(obj, placeState)
         end
         local ok = pcall(function() obj.Parent = target end)
         if ok then added[#added + 1] = obj end
     end
-    lastImported = added
 
-    local logPath = writeImportLog(path, scriptList, stats, parseErr)
-
-    local msg = string.format("Berhasil: %d objek dari %s -> %s (via %s).",
-        #added, displayName(path), TARGETS[targetIndex], how)
-    if #scriptList > 0 then
+    local msg = string.format("%s -> %s: %d objek (via %s)", displayName(path), opts.target, #added, how)
+    if #scripts > 0 then
         if CONFIG.InstallScriptText then
-            msg = msg .. string.format(" Teks script terpasang: %d/%d.", stats.ok, #scriptList)
-            if stats.fail > 0 then
-                msg = msg .. " Gagal: " .. tostring(stats.firstReason) .. "."
-            end
+            msg = msg .. string.format(", teks script %d/%d", stats.ok, #scripts)
+            if stats.fail > 0 then msg = msg .. " (gagal: " .. tostring(stats.firstReason) .. ")" end
         else
-            msg = msg .. string.format(" %d script (teks tidak dipasang, pakai tombol Salin).", #scriptList)
+            msg = msg .. string.format(", %d script (teks tidak dipasang)", #scripts)
         end
-        if parseErr then msg = msg .. " Peringatan baca file: " .. parseErr:sub(1, 80) .. "." end
-        if stats.fail > 0 or parseErr then
-            if logPath then msg = msg .. " Log: " .. logPath end
-        end
-        if outDir and stats.fail > 0 then msg = msg .. " Cadangan .lua: " .. outDir end
     end
-    return true, msg
+    if parseErr then msg = msg .. " | peringatan baca file: " .. parseErr:sub(1, 80) end
+    if outDir and stats.fail > 0 then msg = msg .. " | cadangan .lua: " .. outDir end
+    return #added > 0, (#added > 0) and msg or (msg .. " | tidak ada objek yang bisa dipasang"), added, scripts, stats
 end
 
--- GUI
+-- ---- Batch import ----
+function E.runBatch(list)
+    if S.busy then notify("Masih ada proses berjalan.", "warn") return end
+    if #list == 0 then notify("Belum ada file dipilih.", "warn") return end
+    S.busy, S.cancel = true, false
+    fire("busy", true)
 
-local env = (getgenv and getgenv()) or _G
-if env.__SLImporterGui then
-    pcall(function() env.__SLImporterGui:Destroy() end)
-end
-
-local function make(class, props, parent)
-    local o = Instance.new(class)
-    for k, v in pairs(props) do o[k] = v end
-    if parent then o.Parent = parent end
-    return o
-end
-
-local function corner(o, r)
-    make("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o)
-end
-
-local function button(parent, text, x, y, w, h, color)
-    local b = make("TextButton", {
-        Text = text,
-        Position = UDim2.new(0, x, 0, y),
-        Size = UDim2.new(0, w, 0, h),
-        BackgroundColor3 = color or Color3.fromRGB(55, 58, 70),
-        TextColor3 = Color3.new(1, 1, 1),
-        Font = Enum.Font.GothamMedium,
-        TextSize = 13,
-        BorderSizePixel = 0,
-    }, parent)
-    corner(b)
-    return b
-end
-
-local gui = make("ScreenGui", {
-    Name = "SLImporter",
-    ResetOnSpawn = false,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-})
-local parented = false
-if gethui then
-    local okh, h = pcall(gethui)
-    if okh and h then parented = pcall(function() gui.Parent = h end) end
-end
-if not parented or not gui.Parent then
-    parented = pcall(function() gui.Parent = game:GetService("CoreGui") end)
-end
-if not parented or not gui.Parent then
-    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-end
-env.__SLImporterGui = gui
-
-local frame = make("Frame", {
-    Size = UDim2.new(0, 300, 0, 392),
-    Position = UDim2.new(0.5, -150, 0.5, -196),
-    BackgroundColor3 = Color3.fromRGB(28, 30, 38),
-    BorderSizePixel = 0,
-}, gui)
-corner(frame, 10)
-
-local titleBar = make("Frame", {
-    Size = UDim2.new(1, 0, 0, 32),
-    BackgroundColor3 = Color3.fromRGB(40, 43, 56),
-    BorderSizePixel = 0,
-}, frame)
-corner(titleBar, 10)
-make("TextLabel", {
-    Text = "Studio Lite  |  RBXM Import",
-    Size = UDim2.new(1, -44, 1, 0),
-    Position = UDim2.new(0, 10, 0, 0),
-    BackgroundTransparency = 1,
-    TextColor3 = Color3.new(1, 1, 1),
-    Font = Enum.Font.GothamBold,
-    TextSize = 13,
-    TextXAlignment = Enum.TextXAlignment.Left,
-}, titleBar)
-local closeBtn = button(titleBar, "X", 268, 4, 26, 24, Color3.fromRGB(170, 60, 60))
-
-local INFO = Color3.fromRGB(200, 205, 220)
-local OK = Color3.fromRGB(110, 220, 140)
-local ERR = Color3.fromRGB(240, 110, 110)
-
-local status = make("TextLabel", {
-    Text = "",
-    Position = UDim2.new(0, 10, 0, 36),
-    Size = UDim2.new(0, 280, 0, 66),
-    BackgroundTransparency = 1,
-    TextColor3 = INFO,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextWrapped = true,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-}, frame)
-
-local function setStatus(text, color)
-    status.Text = text
-    status.TextColor3 = color or INFO
-end
-
-local list = make("ScrollingFrame", {
-    Position = UDim2.new(0, 10, 0, 106),
-    Size = UDim2.new(0, 280, 0, 104),
-    BackgroundColor3 = Color3.fromRGB(20, 22, 28),
-    BorderSizePixel = 0,
-    ScrollBarThickness = 4,
-    CanvasSize = UDim2.new(0, 0, 0, 0),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
-}, frame)
-corner(list)
-make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, list)
-make("UIPadding", { PaddingTop = UDim.new(0, 3), PaddingLeft = UDim.new(0, 3), PaddingRight = UDim.new(0, 3) }, list)
-
-local nameBox = make("TextBox", {
-    Text = "",
-    PlaceholderText = "atau ketik nama file (di folder import)",
-    Position = UDim2.new(0, 10, 0, 216),
-    Size = UDim2.new(0, 280, 0, 26),
-    BackgroundColor3 = Color3.fromRGB(20, 22, 28),
-    TextColor3 = Color3.new(1, 1, 1),
-    PlaceholderColor3 = Color3.fromRGB(120, 125, 140),
-    Font = Enum.Font.Gotham,
-    TextSize = 12,
-    ClearTextOnFocus = false,
-    BorderSizePixel = 0,
-}, frame)
-corner(nameBox)
-
-local targetBtn = button(frame, "Target: " .. TARGETS[targetIndex], 10, 248, 136, 28)
-local scriptBtn = button(frame, "", 154, 248, 136, 28)
-local refreshBtn = button(frame, "Refresh", 10, 282, 86, 32)
-local importBtn = button(frame, "Import", 104, 282, 98, 32, Color3.fromRGB(46, 140, 90))
-local undoBtn = button(frame, "Undo", 210, 282, 80, 32, Color3.fromRGB(150, 90, 50))
-local copyBtn = button(frame, "Salin script: -", 10, 320, 190, 32, Color3.fromRGB(60, 90, 160))
-local scanBtn = button(frame, "Scan", 206, 320, 84, 32, Color3.fromRGB(90, 70, 150))
-
-make("TextLabel", {
-    Text = "Folder: Delta/Workspace/" .. CONFIG.Folder,
-    Position = UDim2.new(0, 10, 0, 358),
-    Size = UDim2.new(0, 280, 0, 28),
-    BackgroundTransparency = 1,
-    TextColor3 = Color3.fromRGB(130, 135, 150),
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextWrapped = true,
-    TextXAlignment = Enum.TextXAlignment.Left,
-}, frame)
-
-local function refreshScriptBtn()
-    scriptBtn.Text = CONFIG.DisableScripts and "Script: dimatikan" or "Script: AKTIF"
-    scriptBtn.BackgroundColor3 = CONFIG.DisableScripts and Color3.fromRGB(55, 58, 70) or Color3.fromRGB(170, 120, 40)
-end
-refreshScriptBtn()
-
-local selectedPath = nil
-local fileButtons = {}
-
-local function refreshList()
-    for _, b in ipairs(fileButtons) do b:Destroy() end
-    fileButtons = {}
-    selectedPath = nil
-    local files, err = listImportFiles()
-    for i, f in ipairs(files) do
-        local b = make("TextButton", {
-            Text = displayName(f),
-            Size = UDim2.new(1, -6, 0, 28),
-            BackgroundColor3 = Color3.fromRGB(45, 48, 60),
-            TextColor3 = Color3.new(1, 1, 1),
-            Font = Enum.Font.Gotham,
-            TextSize = 12,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-            BorderSizePixel = 0,
-            LayoutOrder = i,
-        }, list)
-        corner(b, 5)
-        b.MouseButton1Click:Connect(function()
-            selectedPath = f
-            for _, other in ipairs(fileButtons) do
-                other.BackgroundColor3 = Color3.fromRGB(45, 48, 60)
-            end
-            b.BackgroundColor3 = Color3.fromRGB(60, 110, 190)
-            setStatus("Dipilih: " .. displayName(f), INFO)
-        end)
-        fileButtons[#fileButtons + 1] = b
-    end
-    if err then
-        setStatus(err, ERR)
-    elseif #files == 0 then
-        setStatus("Belum ada file .rbxm/.rbxmx. Taruh di folder lalu tekan Refresh.", INFO)
-    else
-        setStatus(#files .. " file ditemukan. Pilih satu lalu Import.", INFO)
-    end
-end
-
-local function resolvePath()
-    local typed = nameBox.Text:match("^%s*(.-)%s*$")
-    if typed ~= "" then
-        if not isfile then return CONFIG.Folder .. "/" .. typed end
-        local candidates = {
-            typed,
-            CONFIG.Folder .. "/" .. typed,
-            CONFIG.Folder .. "/" .. typed .. ".rbxmx",
-            CONFIG.Folder .. "/" .. typed .. ".rbxm",
+    local function body()
+        local total = #list
+        local batch = { objs = {}, target = S.target, count = total }
+        local okN, failN, objN, scriptN = 0, 0, 0, 0
+        local placeState = { offset = 0 }
+        local allScripts = {}
+        local report = {
+            "# Import log " .. os.date("%Y-%m-%d %H:%M:%S"),
+            "target: " .. S.target, "file: " .. total, "",
         }
-        for _, c in ipairs(candidates) do
-            if isfile(c) then return c end
+        logLine(string.format("Batch dimulai: %d file -> %s", total, S.target), "info")
+
+        for i, e in ipairs(list) do
+            if S.cancel or not alive() then
+                logLine(string.format("Dibatalkan sebelum file %d/%d", i, total), "warn")
+                break
+            end
+            S.status[e.path] = "busy"
+            fire("progress", (i - 1) / total, string.format("Import %d/%d: %s", i, total, e.name))
+            fire("rows")
+            task.wait()
+
+            local okc, ok, msg, added, scripts, stats = pcall(doImport, e.raw, { target = S.target }, placeState)
+            if not okc then
+                msg = tostring(ok)
+                ok = false
+            end
+
+            if ok then
+                S.status[e.path], S.reason[e.path] = "ok", nil
+                S.selected[e.path] = nil
+                okN = okN + 1
+                for _, o in ipairs(added) do batch.objs[#batch.objs + 1] = o end
+                objN = objN + #added
+                scriptN = scriptN + #scripts
+                for _, s in ipairs(scripts) do
+                    s.file = e.name
+                    allScripts[#allScripts + 1] = s
+                end
+                logLine(msg, "ok")
+                report[#report + 1] = "[OK] " .. msg
+                for j, s in ipairs(scripts) do
+                    report[#report + 1] = string.format("    (%d) %s [%s] %d byte -> %s",
+                        j, s.path, s.class, #s.source, tostring(stats.notes[j] or "teks tidak dipasang"))
+                end
+            else
+                S.status[e.path], S.reason[e.path] = "fail", tostring(msg)
+                failN = failN + 1
+                logLine(e.name .. ": " .. tostring(msg), "err")
+                report[#report + 1] = "[GAGAL] " .. e.name .. ": " .. tostring(msg)
+            end
+            fire("progress", i / total, string.format("Selesai %d/%d", i, total))
+            fire("selection")
+            fire("rows")
+            task.wait()
         end
-        return nil
+
+        if #batch.objs > 0 then
+            S.history[#S.history + 1] = batch
+            if #S.history > 20 then table.remove(S.history, 1) end
+        end
+        if #allScripts > 0 then
+            S.scriptList, S.scriptIdx = allScripts, 0
+        end
+        if writefile then
+            ensureFolder()
+            pcall(writefile, CONFIG.Folder .. "/import_log.txt", table.concat(report, "\n"))
+        end
+
+        local summary = string.format("Batch selesai: %d berhasil, %d gagal | %d objek, %d script",
+            okN, failN, objN, scriptN)
+        if S.cancel then summary = "Batch dibatalkan. " .. summary end
+        notify(summary, failN > 0 and (okN > 0 and "warn" or "err") or "ok")
+        if okN > 0 and CONFIG.AutoHideAfterImport then fire("autohide") end
     end
-    return selectedPath
+
+    task.spawn(function()
+        local ok, err = pcall(body)
+        if not ok then notify("Error batch: " .. tostring(err), "err") end
+        S.busy, S.cancel = false, false
+        fire("busy", false)
+        fire("progress", 0, "")
+        fire("history")
+        fire("selection")
+        fire("rows")
+    end)
 end
 
-local function updateCopyBtn()
-    local n = #scriptList
-    if n == 0 then
-        copyBtn.Text = "Salin script: -"
-    else
-        copyBtn.Text = string.format("Salin script (%d/%d)", scriptIdx % n + 1, n)
+function E.cancel()
+    if S.busy then
+        S.cancel = true
+        setStatus("Membatalkan setelah file ini selesai...", "warn")
     end
 end
 
-scanBtn.MouseButton1Click:Connect(function()
-    local ok, res = pcall(scanNative)
-    if ok then
-        setStatus(res, INFO)
+-- ---- Undo ----
+function E.undo(all)
+    if S.busy then return end
+    local n, batches = 0, 0
+    while #S.history > 0 do
+        local b = table.remove(S.history)
+        for _, o in ipairs(b.objs) do
+            if o and o.Parent then
+                pcall(function() o:Destroy() end)
+                n = n + 1
+            end
+        end
+        batches = batches + 1
+        if not all then break end
+    end
+    if batches == 0 then
+        notify("Tidak ada batch yang bisa di-undo.", "warn")
     else
-        setStatus("Scan error: " .. tostring(res), ERR)
+        notify(string.format("Undo %d batch: %d objek dihapus.", batches, n), "info")
     end
-end)
+    fire("history")
+end
 
-copyBtn.MouseButton1Click:Connect(function()
-    local n = #scriptList
-    if n == 0 then
-        setStatus("Belum ada script dari import terakhir.", ERR)
-        return
-    end
-    scriptIdx = scriptIdx % n + 1
-    local s = scriptList[scriptIdx]
+-- ---- Salin script (clipboard) ----
+function E.copyNextScript()
+    local n = #S.scriptList
+    if n == 0 then notify("Belum ada script dari import terakhir.", "warn") return end
+    S.scriptIdx = S.scriptIdx % n + 1
+    local s = S.scriptList[S.scriptIdx]
     local clip = setclipboard or toclipboard
     if s.source == "" then
-        setStatus(string.format("Source %s kosong / tidak terbaca (%d/%d). Coba simpan file sebagai .rbxmx.", s.path, scriptIdx, n), ERR)
+        notify(string.format("Source %s kosong / tidak terbaca (%d/%d).", s.path, S.scriptIdx, n), "err")
     elseif not clip then
-        setStatus("Executor tidak punya setclipboard. Ambil dari folder scripts_out.", ERR)
+        notify("Executor tidak punya setclipboard. Ambil dari folder scripts_out.", "err")
+    elseif pcall(clip, s.source) then
+        notify(string.format("Disalin: %s [%s] (%d/%d)", s.path, s.class, S.scriptIdx, n), "ok")
     else
-        local okc = pcall(clip, s.source)
-        if okc then
-            setStatus(string.format("Disalin: %s [%s] (%d/%d). Tempel di editor script Studio Lite.", s.path, s.class, scriptIdx, n), OK)
-        else
-            setStatus("Gagal menyalin ke clipboard.", ERR)
+        notify("Gagal menyalin ke clipboard.", "err")
+    end
+end
+
+function E.scanStudioLite()
+    local ok, res = pcall(scanNative)
+    notify(ok and res or ("Scan error: " .. tostring(res)), ok and "info" or "err")
+end
+
+-- ---- Tambah file manual (executor tanpa listfiles / path di luar scan) ----
+function E.addManual(text)
+    text = (text or ""):match("^%s*(.-)%s*$")
+    if text == "" or not isfile then return false end
+    local candidates = {
+        text, CONFIG.Folder .. "/" .. text,
+        CONFIG.Folder .. "/" .. text .. ".rbxmx", CONFIG.Folder .. "/" .. text .. ".rbxm",
+    }
+    for _, c in ipairs(candidates) do
+        local okf, exists = pcall(isfile, c)
+        if okf and exists then
+            local entry = makeEntry(c)
+            if entry then
+                local dup = false
+                for _, e in ipairs(S.entries) do if e.path == entry.path then dup = true break end end
+                if not dup then
+                    S.entries[#S.entries + 1] = entry
+                    sortList(S.entries, "name")
+                    S.known[entry.path] = true
+                end
+                S.selected[entry.path] = true
+                E.applyView()
+                fire("selection")
+                notify("Ditambahkan manual: " .. entry.name, "ok")
+                return true
+            end
         end
     end
-    updateCopyBtn()
+    return false
+end
+
+-- ---- Watcher latar belakang ----
+task.spawn(function()
+    local acc = 0
+    while alive() do
+        task.wait(1)
+        if CONFIG.AutoScan and not S.busy and not S.scanning then
+            acc = acc + 1
+            if acc >= CONFIG.AutoScanInterval then
+                acc = 0
+                rescan(true)
+            end
+        else
+            acc = 0
+        end
+    end
 end)
 
-local busy = false
 
-importBtn.MouseButton1Click:Connect(function()
-    if busy then return end
-    local path = resolvePath()
-    if not path then
-        setStatus("File tidak ketemu. Pilih dari daftar atau cek nama file.", ERR)
-        return
+-- ===================================================================
+-- GUI
+-- ===================================================================
+
+local function buildGui()
+    local T = {
+        bg = Color3.fromRGB(18, 20, 27), panel = Color3.fromRGB(24, 27, 36),
+        panel2 = Color3.fromRGB(34, 38, 51), titleBar = Color3.fromRGB(27, 30, 41),
+        row = Color3.fromRGB(30, 33, 45), rowSel = Color3.fromRGB(32, 50, 92),
+        rowFocus = Color3.fromRGB(40, 44, 60), line = Color3.fromRGB(56, 61, 80),
+        text = Color3.fromRGB(235, 238, 248), sub = Color3.fromRGB(139, 146, 168),
+        accent = Color3.fromRGB(88, 130, 255), ok = Color3.fromRGB(60, 170, 110),
+        okText = Color3.fromRGB(96, 214, 144), warn = Color3.fromRGB(240, 180, 70),
+        err = Color3.fromRGB(240, 98, 98), purple = Color3.fromRGB(140, 105, 235),
+        white = Color3.new(1, 1, 1),
+    }
+    local KIND = { info = T.text, ok = T.okText, warn = T.warn, err = T.err }
+    local TITLE_H, STATUS_H, TAB_H, ROW_H = 34, 26, 30, 36
+    local MIN_W, MIN_H = 380, 260
+
+    local function make(class, props, parent)
+        local o = Instance.new(class)
+        for k, v in pairs(props) do o[k] = v end
+        if parent then o.Parent = parent end
+        return o
     end
-    busy = true
-    setStatus("Memuat " .. displayName(path) .. " ...", INFO)
-    task.spawn(function()
-        local okc, ok, msg = pcall(doImport, path)
-        if not okc then
-            setStatus("Error: " .. tostring(ok), ERR)
-        else
-            setStatus(msg, ok and OK or ERR)
+    local function corner(o, r)
+        return make("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o)
+    end
+    local function stroke(o, color, th, tr)
+        return make("UIStroke", {
+            Color = color, Thickness = th or 1, Transparency = tr or 0,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        }, o)
+    end
+    local function tween(o, t, props, style)
+        TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+    end
+    local function label(parent, props)
+        local base = {
+            BackgroundTransparency = 1, TextColor3 = T.text, Font = Enum.Font.Gotham,
+            TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
+        }
+        for k, v in pairs(props) do base[k] = v end
+        return make("TextLabel", base, parent)
+    end
+    local function button(parent, text, bg, props)
+        local base = {
+            Text = text, BackgroundColor3 = bg or T.panel2, TextColor3 = T.text,
+            Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = false, BorderSizePixel = 0,
+        }
+        for k, v in pairs(props or {}) do base[k] = v end
+        local b = make("TextButton", base, parent)
+        corner(b, 6)
+        local ov = make("Frame", {
+            Name = "Hover", Size = UDim2.fromScale(1, 1), BackgroundColor3 = T.white,
+            BackgroundTransparency = 1, BorderSizePixel = 0, Active = false,
+        }, b)
+        corner(ov, 6)
+        bind(b.MouseEnter, function() tween(ov, 0.1, { BackgroundTransparency = 0.9 }) end)
+        bind(b.MouseLeave, function() tween(ov, 0.1, { BackgroundTransparency = 1 }) end)
+        bind(b.MouseButton1Down, function() tween(ov, 0.05, { BackgroundTransparency = 0.8 }) end)
+        bind(b.MouseButton1Up, function() tween(ov, 0.1, { BackgroundTransparency = 0.9 }) end)
+        return b
+    end
+
+    -- ---- ScreenGui ----
+    local gui = make("ScreenGui", {
+        Name = "SLImporter", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 999,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    })
+    local parented = false
+    if gethui then
+        local okh, h = pcall(gethui)
+        if okh and h then parented = pcall(function() gui.Parent = h end) end
+    end
+    if not parented or not gui.Parent then
+        parented = pcall(function() gui.Parent = game:GetService("CoreGui") end)
+    end
+    if not parented or not gui.Parent then
+        gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    env.__SLImporterGui = gui
+    env.__SLImporterCleanup = function()
+        env.__SLImporterRun = nil
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        pcall(function() gui:Destroy() end)
+        env.__SLImporterGui = nil
+        env.__SLImporterCleanup = nil
+    end
+
+    local function viewport()
+        local v = gui.AbsoluteSize
+        if v.X < 50 or v.Y < 50 then
+            local cam = workspace.CurrentCamera
+            v = cam and cam.ViewportSize or Vector2.new(800, 600)
         end
-        updateCopyBtn()
-        busy = false
+        return v
+    end
+
+    -- ---- State jendela ----
+    local vp0 = viewport()
+    local W = {
+        w = math.clamp(S.ui.w or 460, MIN_W, math.max(MIN_W, vp0.X - 16)),
+        h = math.clamp(S.ui.h or 340, MIN_H, math.max(MIN_H, vp0.Y - 16)),
+        maxed = false, minimized = false, hidden = false, prog = 0,
+    }
+    W.x = math.clamp(S.ui.x or math.floor((vp0.X - W.w) / 2), 0, math.max(0, vp0.X - 80))
+    W.y = math.clamp(S.ui.y or math.floor((vp0.Y - W.h) / 2), 0, math.max(0, vp0.Y - TITLE_H))
+
+    local Main = make("Frame", {
+        Name = "Main", Position = UDim2.fromOffset(W.x, W.y), Size = UDim2.fromOffset(W.w, W.h),
+        BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true,
+    }, gui)
+    corner(Main, 10)
+    stroke(Main, T.line, 1)
+    local mainScale = make("UIScale", { Scale = 1 }, Main)
+
+    -- ---- Tombol kecil (open button) + toast ----
+    local mini = make("TextButton", {
+        Name = "Open", Text = "SL", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = T.white,
+        BackgroundColor3 = T.accent, Size = UDim2.fromOffset(44, 44), AutoButtonColor = false,
+        Position = UDim2.fromOffset(
+            math.clamp(S.ui.mx or 12, 0, math.max(0, vp0.X - 44)),
+            math.clamp(S.ui.my or math.floor(vp0.Y / 2), 0, math.max(0, vp0.Y - 44))),
+        Visible = false, BorderSizePixel = 0,
+    }, gui)
+    corner(mini, 22)
+    stroke(mini, T.white, 1.5, 0.6)
+    local badge = label(mini, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 4, 0, -4),
+        AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 16),
+        BackgroundTransparency = 0, BackgroundColor3 = T.warn, TextColor3 = Color3.new(0, 0, 0),
+        Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Center,
+        Visible = false,
+    })
+    corner(badge, 8)
+    make("UIPadding", { PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5) }, badge)
+    make("UISizeConstraint", { MinSize = Vector2.new(16, 16) }, badge)
+
+    local toastFrame = make("Frame", {
+        Name = "Toast", AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 30),
+        BackgroundColor3 = T.panel2, BorderSizePixel = 0, Visible = false, ClipsDescendants = true,
+    }, gui)
+    corner(toastFrame, 8)
+    local toastStroke = stroke(toastFrame, T.line, 1)
+    make("UISizeConstraint", { MinSize = Vector2.new(60, 30), MaxSize = Vector2.new(300, 30) }, toastFrame)
+    make("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, toastFrame)
+    local toastLbl = label(toastFrame, {
+        AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.new(0, 0, 1, 0), TextSize = 11, TextWrapped = false,
+    })
+
+    local function updateMini()
+        if S.busy then
+            badge.Text = math.floor(W.prog * 100 + 0.5) .. "%"
+            badge.BackgroundColor3 = T.warn
+            badge.Visible = true
+        else
+            local n = E.selCount()
+            if n > 0 then
+                badge.Text = tostring(n)
+                badge.BackgroundColor3 = T.okText
+                badge.Visible = true
+            else
+                badge.Visible = false
+            end
+        end
+    end
+
+    local toastToken = 0
+    local function toast(text, kind)
+        if not W.hidden then return end
+        toastToken = toastToken + 1
+        local tok = toastToken
+        if #text > 56 then text = text:sub(1, 55) .. "..." end
+        toastLbl.Text = text
+        toastLbl.TextColor3 = KIND[kind] or T.text
+        toastLbl.TextTransparency = 0
+        toastFrame.BackgroundTransparency = 0
+        toastStroke.Transparency = 0
+        local mx, my = mini.Position.X.Offset, mini.Position.Y.Offset
+        local right = mx > viewport().X / 2
+        toastFrame.AnchorPoint = Vector2.new(right and 1 or 0, 0)
+        toastFrame.Position = UDim2.fromOffset(right and (mx + 44) or mx, (my > 44) and (my - 36) or (my + 50))
+        toastFrame.Visible = true
+        task.delay(3.2, function()
+            if toastToken ~= tok or not alive() then return end
+            tween(toastFrame, 0.3, { BackgroundTransparency = 1 })
+            tween(toastLbl, 0.3, { TextTransparency = 1 })
+            tween(toastStroke, 0.3, { Transparency = 1 })
+            task.delay(0.32, function()
+                if toastToken == tok and alive() then toastFrame.Visible = false end
+            end)
+        end)
+    end
+
+    local function persistRect()
+        S.ui = {
+            x = W.x, y = W.y, w = W.w, h = W.h,
+            mx = mini.Position.X.Offset, my = mini.Position.Y.Offset,
+        }
+        E.saveSettings()
+    end
+
+    -- ---- Drag generik (mouse & touch) ----
+    local function draggable(handle, target, onEnd, canDrag)
+        local dragging, moved, dragStart, startPos = false, false, nil, nil
+        bind(handle.InputBegan, function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                if canDrag and not canDrag() then
+                    if onEnd then onEnd(false) end
+                    return
+                end
+                dragging, moved = true, false
+                dragStart, startPos = input.Position, target.Position
+                local c
+                c = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                        c:Disconnect()
+                        if onEnd then onEnd(moved) end
+                    end
+                end)
+            end
+        end)
+        bind(UIS.InputChanged, function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - dragStart
+                if not moved and d.Magnitude < 5 then return end
+                moved = true
+                local vp = viewport()
+                local nx = math.clamp(startPos.X.Offset + d.X, -(target.AbsoluteSize.X - 70), vp.X - 70)
+                local ny = math.clamp(startPos.Y.Offset + d.Y, 0, vp.Y - 30)
+                target.Position = UDim2.fromOffset(nx, ny)
+            end
+        end)
+    end
+
+    -- ---- Title bar ----
+    local titleBar = make("Frame", {
+        Name = "Title", Size = UDim2.new(1, 0, 0, TITLE_H), BackgroundColor3 = T.titleBar, BorderSizePixel = 0,
+    }, Main)
+    local logo = make("Frame", {
+        Position = UDim2.fromOffset(10, 9), Size = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = T.accent, BorderSizePixel = 0,
+    }, titleBar)
+    corner(logo, 5)
+    label(logo, {
+        Size = UDim2.fromScale(1, 1), Text = "S", Font = Enum.Font.GothamBold, TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = T.white,
+    })
+    label(titleBar, {
+        Text = "Studio Lite Importer", Position = UDim2.fromOffset(34, 0), Size = UDim2.new(1, -190, 1, 0),
+        Font = Enum.Font.GothamBold, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local countChip = label(titleBar, {
+        Text = "0 file", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -100, 0.5, 0),
+        Size = UDim2.fromOffset(54, 18), BackgroundTransparency = 0, BackgroundColor3 = T.panel2,
+        TextColor3 = T.sub, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Center,
+    })
+    corner(countChip, 9)
+
+    local function iconButton(kind, xOff)
+        local b = button(titleBar, "", T.titleBar, {
+            Size = UDim2.fromOffset(28, 22), Position = UDim2.new(1, xOff, 0.5, -11),
+        })
+        if kind == "min" then
+            make("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(10, 2), BackgroundColor3 = T.sub, BorderSizePixel = 0,
+            }, b)
+        elseif kind == "max" then
+            local f = make("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(10, 10), BackgroundTransparency = 1, BorderSizePixel = 0,
+            }, b)
+            stroke(f, T.sub, 1.5)
+        else
+            for _, rot in ipairs({ 45, -45 }) do
+                make("Frame", {
+                    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                    Size = UDim2.fromOffset(13, 2), BackgroundColor3 = T.sub, BorderSizePixel = 0, Rotation = rot,
+                }, b)
+            end
+        end
+        return b
+    end
+    local btnMin = iconButton("min", -94)
+    local btnMax = iconButton("max", -64)
+    local btnClose = iconButton("close", -34)
+
+    -- ---- Body, tab, halaman ----
+    local Body = make("Frame", {
+        Name = "Body", Position = UDim2.fromOffset(0, TITLE_H),
+        Size = UDim2.new(1, 0, 1, -(TITLE_H + STATUS_H)), BackgroundTransparency = 1,
+    }, Main)
+    local TabBar = make("Frame", {
+        Size = UDim2.new(1, 0, 0, TAB_H), BackgroundColor3 = T.panel, BorderSizePixel = 0,
+    }, Body)
+    local Pages = make("Frame", {
+        Position = UDim2.fromOffset(0, TAB_H), Size = UDim2.new(1, 0, 1, -TAB_H), BackgroundTransparency = 1,
+    }, Body)
+    local PF = make("Frame", { Name = "Files", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, Pages)
+    local PL = make("Frame", { Name = "Log", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
+    local PS = make("Frame", { Name = "Settings", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
+
+    local tabDefs = { { "files", "Files", PF }, { "log", "Log", PL }, { "set", "Pengaturan", PS } }
+    local tabBtns = {}
+    local tabInd = make("Frame", {
+        Size = UDim2.new(1 / 3, -16, 0, 2), Position = UDim2.new(0, 8, 1, -2),
+        BackgroundColor3 = T.accent, BorderSizePixel = 0,
+    }, TabBar)
+    corner(tabInd, 1)
+    local function setTab(id)
+        for i, d in ipairs(tabDefs) do
+            local on = d[1] == id
+            d[3].Visible = on
+            tabBtns[d[1]].TextColor3 = on and T.text or T.sub
+            if on then
+                tween(tabInd, 0.15, { Position = UDim2.new((i - 1) / 3, 8, 1, -2) })
+            end
+        end
+    end
+    for i, d in ipairs(tabDefs) do
+        local tb = make("TextButton", {
+            Text = d[2], Size = UDim2.new(1 / 3, 0, 1, -2), Position = UDim2.new((i - 1) / 3, 0, 0, 0),
+            BackgroundTransparency = 1, TextColor3 = T.sub, Font = Enum.Font.GothamMedium, TextSize = 12,
+            AutoButtonColor = false, BorderSizePixel = 0,
+        }, TabBar)
+        tabBtns[d[1]] = tb
+        bind(tb.MouseButton1Click, function() setTab(d[1]) end)
+    end
+
+    -- ---- Status bar + progress ----
+    local StatusBar = make("Frame", {
+        Name = "Status", Position = UDim2.new(0, 0, 1, -STATUS_H), Size = UDim2.new(1, 0, 0, STATUS_H),
+        BackgroundColor3 = T.titleBar, BorderSizePixel = 0,
+    }, Main)
+    local progTrack = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = T.line, BorderSizePixel = 0,
+    }, StatusBar)
+    local progFill = make("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = T.accent, BorderSizePixel = 0 }, progTrack)
+    local statusLbl = label(StatusBar, {
+        Position = UDim2.fromOffset(10, 3), Size = UDim2.new(1, -36, 1, -3), TextSize = 11,
+        TextColor3 = T.sub, TextTruncate = Enum.TextTruncate.AtEnd, Text = "Memulai...",
+    })
+
+    -- ---- Pegangan resize (pojok kanan-bawah) ----
+    local grip = make("TextButton", {
+        Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.fromOffset(22, 22),
+        AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), ZIndex = 5,
+    }, Main)
+    for i = 1, 2 do
+        make("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -9 - (i - 1) * 3, 1, -9 - (i - 1) * 3),
+            Size = UDim2.fromOffset(16 - (i - 1) * 7, 1), BackgroundColor3 = T.sub, BorderSizePixel = 0,
+            Rotation = -45, ZIndex = 5,
+        }, Main)
+    end
+
+    -- ---- Operasi jendela ----
+    local function maxRect()
+        local vp = viewport()
+        local w, h = math.min(vp.X - 20, 820), math.min(vp.Y - 20, 560)
+        return math.floor((vp.X - w) / 2), math.floor((vp.Y - h) / 2), w, h
+    end
+
+    local function applyRect(animated)
+        local x, y, w, h
+        if W.maxed then x, y, w, h = maxRect() else x, y, w, h = W.x, W.y, W.w, W.h end
+        if W.minimized then h = TITLE_H end
+        local pos, size = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h)
+        if animated then
+            TweenService:Create(Main, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                { Position = pos, Size = size }):Play()
+        else
+            Main.Position, Main.Size = pos, size
+        end
+        Body.Visible = not W.minimized
+        StatusBar.Visible = not W.minimized
+        grip.Visible = not W.minimized and not W.maxed
+    end
+
+    local function toggleMin()
+        W.minimized = not W.minimized
+        applyRect(true)
+    end
+
+    local function toggleMax()
+        if W.minimized then W.minimized = false end
+        W.maxed = not W.maxed
+        applyRect(true)
+    end
+
+    local function showWindow()
+        if not W.hidden then return end
+        W.hidden = false
+        mini.Visible = false
+        toastFrame.Visible = false
+        Main.Visible = true
+        mainScale.Scale = 0.92
+        tween(mainScale, 0.18, { Scale = 1 }, Enum.EasingStyle.Back)
+    end
+
+    local function hideWindow()
+        if W.hidden then return end
+        W.hidden = true
+        tween(mainScale, 0.12, { Scale = 0.92 })
+        mini.Visible = true
+        updateMini()
+        task.delay(0.12, function()
+            if alive() and W.hidden then Main.Visible = false end
+        end)
+    end
+
+    bind(btnMin.MouseButton1Click, toggleMin)
+    bind(btnMax.MouseButton1Click, toggleMax)
+    bind(btnClose.MouseButton1Click, hideWindow) -- hanya menyembunyikan; engine tetap jalan
+
+    -- geser jendela lewat title bar, ketuk dua kali = maximize
+    local lastTap = 0
+    draggable(titleBar, Main, function(moved)
+        if moved then
+            if not W.maxed then
+                W.x, W.y = Main.Position.X.Offset, Main.Position.Y.Offset
+                persistRect()
+            end
+        else
+            local now = os.clock()
+            if now - lastTap < 0.35 then toggleMax() lastTap = 0 else lastTap = now end
+        end
+    end, function() return not W.maxed end)
+
+    -- geser tombol kecil; ketuk = buka jendela
+    draggable(mini, mini, function(moved)
+        if moved then persistRect() else showWindow() end
     end)
-end)
 
-undoBtn.MouseButton1Click:Connect(function()
-    local n = 0
-    for _, obj in ipairs(lastImported) do
-        if obj and obj.Parent then
-            pcall(function() obj:Destroy() end)
-            n = n + 1
+    -- resize lewat grip
+    do
+        local resizing, startIn, startSize = false, nil, nil
+        bind(grip.InputBegan, function(input)
+            if (input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch) and not W.maxed and not W.minimized then
+                resizing = true
+                startIn, startSize = input.Position, Vector2.new(W.w, W.h)
+                local c
+                c = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        resizing = false
+                        c:Disconnect()
+                        persistRect()
+                    end
+                end)
+            end
+        end)
+        bind(UIS.InputChanged, function(input)
+            if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - startIn
+                local vp = viewport()
+                W.w = math.clamp(startSize.X + d.X, MIN_W, math.max(MIN_W, vp.X - W.x))
+                W.h = math.clamp(startSize.Y + d.Y, MIN_H, math.max(MIN_H, vp.Y - W.y))
+                Main.Size = UDim2.fromOffset(W.w, W.h)
+            end
+        end)
+    end
+
+    -- toggle lewat keyboard (PC)
+    bind(UIS.InputBegan, function(input, processed)
+        if not processed and input.KeyCode == CONFIG.ToggleKey then
+            if W.hidden then showWindow() else hideWindow() end
+        end
+    end)
+
+    -- jaga posisi tetap di layar saat viewport berubah (rotasi HP, dsb.)
+    bind(gui:GetPropertyChangedSignal("AbsoluteSize"), function()
+        local vp = viewport()
+        W.w = math.clamp(W.w, MIN_W, math.max(MIN_W, vp.X - 8))
+        W.h = math.clamp(W.h, MIN_H, math.max(MIN_H, vp.Y - 8))
+        W.x = math.clamp(W.x, 0, math.max(0, vp.X - 80))
+        W.y = math.clamp(W.y, 0, math.max(0, vp.Y - TITLE_H))
+        applyRect(false)
+        mini.Position = UDim2.fromOffset(
+            math.clamp(mini.Position.X.Offset, 0, math.max(0, vp.X - 44)),
+            math.clamp(mini.Position.Y.Offset, 0, math.max(0, vp.Y - 44)))
+    end)
+
+    -- ---- Dropdown ----
+    local dd = nil
+    local function closeDropdown()
+        if dd then
+            dd.blocker:Destroy()
+            dd.menu:Destroy()
+            dd = nil
         end
     end
-    lastImported = {}
-    setStatus(n .. " objek import terakhir dihapus.", INFO)
-end)
-
-targetBtn.MouseButton1Click:Connect(function()
-    targetIndex = targetIndex % #TARGETS + 1
-    targetBtn.Text = "Target: " .. TARGETS[targetIndex]
-end)
-
-scriptBtn.MouseButton1Click:Connect(function()
-    CONFIG.DisableScripts = not CONFIG.DisableScripts
-    refreshScriptBtn()
-end)
-
-refreshBtn.MouseButton1Click:Connect(refreshList)
-closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
-
--- drag lewat title bar (mouse & touch)
-do
-    local dragging, dragStart, startPos = false, nil, nil
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+    local function dropdown(anchor, options, current, onPick)
+        closeDropdown()
+        local rel = anchor.AbsolutePosition - Main.AbsolutePosition
+        local itemH = 28
+        local h = #options * itemH + 8
+        local w = math.max(anchor.AbsoluteSize.X, 150)
+        local y = rel.Y - h - 4
+        if y < TITLE_H + 4 then y = rel.Y + anchor.AbsoluteSize.Y + 4 end
+        local x = math.max(4, math.min(rel.X, Main.AbsoluteSize.X - w - 6))
+        local blocker = make("TextButton", {
+            Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 50, AutoButtonColor = false,
+        }, Main)
+        local menu = make("Frame", {
+            Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+            BackgroundColor3 = T.panel, BorderSizePixel = 0, ZIndex = 51,
+        }, Main)
+        corner(menu, 8)
+        stroke(menu, T.line, 1)
+        dd = { blocker = blocker, menu = menu }
+        bind(blocker.MouseButton1Click, closeDropdown)
+        for i, opt in ipairs(options) do
+            local b = button(menu, opt.text, (opt.value == current) and T.accent or T.panel2, {
+                Position = UDim2.fromOffset(4, 4 + (i - 1) * itemH), Size = UDim2.new(1, -8, 0, itemH - 2),
+                TextSize = 12,
+            })
+            bind(b.MouseButton1Click, function()
+                closeDropdown()
+                onPick(opt.value)
             end)
         end
+    end
+
+    -- ===============================================================
+    -- Halaman FILES
+    -- ===============================================================
+    local layout = { wide = false }
+
+    -- baris cari
+    local searchRow = make("Frame", {
+        Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 28), BackgroundTransparency = 1,
+    }, PF)
+    local sbox = make("Frame", {
+        Size = UDim2.new(1, -(86 + 52 + 12), 1, 0), BackgroundColor3 = T.panel2, BorderSizePixel = 0,
+    }, searchRow)
+    corner(sbox, 6)
+    local sstroke = stroke(sbox, T.line, 1)
+    local mg = make("Frame", {
+        Position = UDim2.fromOffset(9, 8), Size = UDim2.fromOffset(9, 9), BackgroundTransparency = 1,
+    }, sbox)
+    corner(mg, 5)
+    stroke(mg, T.sub, 1.5)
+    make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(20, 19), Size = UDim2.fromOffset(6, 2),
+        BackgroundColor3 = T.sub, BorderSizePixel = 0, Rotation = 45,
+    }, sbox)
+    local searchBox = make("TextBox", {
+        Position = UDim2.fromOffset(28, 0), Size = UDim2.new(1, -54, 1, 0), BackgroundTransparency = 1,
+        Text = S.query, PlaceholderText = "Cari nama / folder...", PlaceholderColor3 = T.sub,
+        TextColor3 = T.text, Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, sbox)
+    local clearBtn = make("TextButton", {
+        Text = "x", Size = UDim2.fromOffset(22, 22), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -3, 0.5, 0), BackgroundTransparency = 1, TextColor3 = T.sub,
+        Font = Enum.Font.GothamBold, TextSize = 13, Visible = false, BorderSizePixel = 0,
+    }, sbox)
+    local sortBtn = button(searchRow, "", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -58, 0, 0), Size = UDim2.fromOffset(86, 28), TextSize = 11,
+    })
+    local scanBtn = button(searchRow, "Scan", T.purple, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(52, 28), TextSize = 11,
+    })
+
+    -- baris chip filter + pilih
+    local chipRow = make("Frame", {
+        Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 24), BackgroundTransparency = 1,
+    }, PF)
+    local chips = {}
+    local chipDefs = { { "all", "Semua", 0, 60 }, { "rbxm", "RBXM", 64, 58 }, { "rbxmx", "RBXMX", 126, 62 } }
+    for _, d in ipairs(chipDefs) do
+        local b = button(chipRow, "", T.panel2, {
+            Position = UDim2.fromOffset(d[3], 0), Size = UDim2.fromOffset(d[4], 24), TextSize = 11,
+        })
+        chips[d[1]] = b
+        bind(b.MouseButton1Click, function()
+            S.filter = d[1]
+            E.applyView()
+            E.saveSettings()
+        end)
+    end
+    local selAllBtn = button(chipRow, "Pilih semua", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -80, 0, 0), Size = UDim2.fromOffset(84, 24), TextSize = 11,
+    })
+    local selNoneBtn = button(chipRow, "Kosongkan", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(76, 24), TextSize = 11,
+    })
+
+    -- daftar file (virtual list: hanya baris yang terlihat yang dibuat)
+    local list = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 66), Size = UDim2.new(1, -16, 1, -154), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, PF)
+    corner(list, 8)
+    local emptyLbl = label(list, {
+        Position = UDim2.fromOffset(12, 12), Size = UDim2.fromOffset(280, 60), TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = T.sub, TextSize = 11, Text = "",
+    })
+
+    local pool, lastCanvasH = {}, -1
+
+    local function paintRow(row)
+        local e = row.entry
+        if not e then return end
+        local sel = S.selected[e.path]
+        local focus = S.focus == e
+        row.frame.BackgroundColor3 = sel and T.rowSel or (focus and T.rowFocus or T.row)
+        row.stroke.Transparency = focus and 0 or 1
+        row.fill.Visible = sel and true or false
+        row.name.Text = e.name
+        row.dir.Text = (e.dir == "") and "(root)" or e.dir
+        row.badge.Text = (e.ext == "rbxm") and "RBXM" or "RBXMX"
+        row.badge.TextColor3 = (e.ext == "rbxm") and T.accent or T.purple
+        local st = S.status[e.path]
+        if st == "ok" then
+            row.state.Text, row.state.TextColor3 = "OK", T.okText
+        elseif st == "fail" then
+            row.state.Text, row.state.TextColor3 = "GAGAL", T.err
+        elseif st == "busy" then
+            row.state.Text, row.state.TextColor3 = "...", T.warn
+        else
+            row.state.Text = ""
+        end
+    end
+
+    local function makeRow()
+        local row = {}
+        local f = make("TextButton", {
+            Text = "", AutoButtonColor = false, Size = UDim2.new(1, -10, 0, ROW_H - 4),
+            BackgroundColor3 = T.row, BorderSizePixel = 0, Visible = false,
+        }, list)
+        corner(f, 6)
+        row.frame = f
+        row.stroke = stroke(f, T.accent, 1, 1)
+        local cb = make("Frame", {
+            Position = UDim2.new(0, 8, 0.5, -9), Size = UDim2.fromOffset(18, 18),
+            BackgroundColor3 = T.bg, BorderSizePixel = 0,
+        }, f)
+        corner(cb, 4)
+        stroke(cb, T.line, 1.5)
+        row.fill = make("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(10, 10), BackgroundColor3 = T.accent, BorderSizePixel = 0, Visible = false,
+        }, cb)
+        corner(row.fill, 3)
+        row.name = label(f, {
+            Position = UDim2.fromOffset(34, 3), Size = UDim2.new(1, -34 - 92, 0, 15), Font = Enum.Font.GothamMedium,
+            TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+        })
+        row.dir = label(f, {
+            Position = UDim2.fromOffset(34, 18), Size = UDim2.new(1, -34 - 92, 0, 11), TextSize = 10,
+            TextColor3 = T.sub, TextTruncate = Enum.TextTruncate.AtEnd,
+        })
+        row.badge = label(f, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(42, 16),
+            BackgroundTransparency = 0, BackgroundColor3 = T.bg, Font = Enum.Font.GothamBold, TextSize = 9,
+            TextXAlignment = Enum.TextXAlignment.Center,
+        })
+        corner(row.badge, 4)
+        row.state = label(f, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -54, 0.5, 0), Size = UDim2.fromOffset(40, 14),
+            Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Right,
+        })
+        bind(f.MouseButton1Click, function()
+            local e = row.entry
+            if e then
+                E.toggle(e)
+                E.setFocus(e)
+            end
+        end)
+        return row
+    end
+
+    local function renderList()
+        local n = #S.view
+        local canvasH = n * ROW_H + 6
+        if canvasH ~= lastCanvasH then
+            lastCanvasH = canvasH
+            list.CanvasSize = UDim2.new(0, 0, 0, canvasH)
+        end
+        local need = math.ceil(math.max(list.AbsoluteSize.Y, 60) / ROW_H) + 3
+        while #pool < need do pool[#pool + 1] = makeRow() end
+        local first = math.max(1, math.floor(list.CanvasPosition.Y / ROW_H) + 1)
+        for i, row in ipairs(pool) do
+            local e = S.view[first + i - 1]
+            if e then
+                row.entry = e
+                row.frame.Position = UDim2.fromOffset(4, (first + i - 2) * ROW_H + 3)
+                row.frame.Visible = true
+                paintRow(row)
+            else
+                row.entry = nil
+                row.frame.Visible = false
+            end
+        end
+        if n == 0 then
+            if S.scanning then
+                emptyLbl.Text = "Memindai file..."
+            elseif #S.entries == 0 then
+                emptyLbl.Text = "Belum ada file .rbxm / .rbxmx.\nTaruh di folder " .. CONFIG.Folder
+                    .. " lalu tekan Scan, atau ketik path file di kolom cari lalu Enter."
+            else
+                emptyLbl.Text = "Tidak ada hasil untuk filter / pencarian ini."
+            end
+            emptyLbl.Visible = true
+        else
+            emptyLbl.Visible = false
+        end
+    end
+
+    local function refreshRows()
+        for _, row in ipairs(pool) do
+            if row.entry then paintRow(row) end
+        end
+    end
+
+    bind(list:GetPropertyChangedSignal("CanvasPosition"), renderList)
+    bind(list:GetPropertyChangedSignal("AbsoluteSize"), renderList)
+
+    -- panel detail (samping saat lebar, strip bawah saat sempit)
+    local detail = make("Frame", { BackgroundColor3 = T.panel, BorderSizePixel = 0 }, PF)
+    corner(detail, 8)
+    local nameLbl = label(detail, {
+        Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -20, 0, 16), Font = Enum.Font.GothamBold,
+        TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local metaLbl = label(detail, {
+        Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -20, 0, 12), TextSize = 10,
+        TextColor3 = T.sub, TextTruncate = Enum.TextTruncate.AtEnd, TextYAlignment = Enum.TextYAlignment.Top,
+    })
+    local detailBtn = button(detail, "Import file ini saja", T.ok, {
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -8), Size = UDim2.new(1, -20, 0, 26),
+        TextSize = 11, Visible = false,
+    })
+
+    local function paintDetail()
+        local e = S.focus
+        if not e then
+            nameLbl.Text = "Tidak ada file dipilih"
+            metaLbl.Text = "Tap baris untuk mencentang & melihat detail."
+            detailBtn.Visible = false
+            return
+        end
+        nameLbl.Text = e.name
+        local info = S.infoCache[e.path]
+        local lines = {}
+        if not info then
+            lines[1] = "Membaca file..."
+        elseif info.err then
+            lines[1] = info.err
+        else
+            lines[1] = info.format .. " | " .. fmtBytes(info.size)
+            if info.objects then
+                lines[2] = info.objects .. " objek | " .. info.scripts .. " script"
+                lines[3] = "Root: " .. info.rootClass .. " \"" .. info.rootName .. "\""
+                    .. ((info.roots or 1) > 1 and (" +" .. (info.roots - 1)) or "")
+            elseif info.skipped then
+                lines[2] = "File besar, isi tidak dianalisis"
+            elseif info.parseErr then
+                lines[2] = "Isi tidak terbaca: " .. info.parseErr:sub(1, 60)
+            end
+        end
+        if layout.wide then
+            lines[#lines + 1] = "Folder: " .. ((e.dir == "") and "(root)" or e.dir)
+            local st = S.status[e.path]
+            if st == "ok" then lines[#lines + 1] = "Status: berhasil diimport"
+            elseif st == "fail" then lines[#lines + 1] = "Status: gagal - " .. tostring(S.reason[e.path] or "")
+            end
+        end
+        metaLbl.Text = table.concat(lines, layout.wide and "\n" or " | ")
+        detailBtn.Visible = layout.wide and not S.busy
+        if layout.compact and not S.busy then
+            setStatus(e.name .. " | " .. table.concat(lines, " | "), "info")
+        end
+    end
+
+    -- bar aksi bawah
+    local actionBar = make("Frame", {
+        Position = UDim2.new(0, 8, 1, -38), Size = UDim2.new(1, -16, 0, 34), BackgroundTransparency = 1,
+    }, PF)
+    local targetBtn = button(actionBar, "", T.panel2, { Size = UDim2.fromOffset(116, 34), TextSize = 11 })
+    local scriptsBtn = button(actionBar, "", T.panel2, { Position = UDim2.fromOffset(122, 0), Size = UDim2.fromOffset(86, 34), TextSize = 11 })
+    local undoBtn = button(actionBar, "Undo", T.panel2, { Position = UDim2.fromOffset(214, 0), Size = UDim2.fromOffset(60, 34), TextSize = 11 })
+    local importBtn = button(actionBar, "Import", T.panel2, {
+        Position = UDim2.fromOffset(280, 0), Size = UDim2.new(1, -280, 1, 0), Font = Enum.Font.GothamBold, TextSize = 13,
+    })
+
+    local function paintAction()
+        local n = E.selCount()
+        targetBtn.Text = "To: " .. TARGET_SHORT[S.target]
+        scriptsBtn.Text = CONFIG.DisableScripts and "Script: OFF" or "Script: ON"
+        scriptsBtn.BackgroundColor3 = CONFIG.DisableScripts and T.panel2 or Color3.fromRGB(150, 105, 35)
+        undoBtn.Text = (#S.history > 0) and ("Undo (" .. #S.history .. ")") or "Undo"
+        undoBtn.TextColor3 = (#S.history > 0 and not S.busy) and T.text or T.sub
+        if S.busy then
+            importBtn.Text = S.cancel and "Membatalkan..." or "Batal"
+            importBtn.BackgroundColor3 = Color3.fromRGB(170, 65, 65)
+            importBtn.TextColor3 = T.text
+        elseif n > 0 then
+            importBtn.Text = "Import (" .. n .. ")"
+            importBtn.BackgroundColor3 = T.ok
+            importBtn.TextColor3 = T.text
+        else
+            importBtn.Text = "Import"
+            importBtn.BackgroundColor3 = T.panel2
+            importBtn.TextColor3 = T.sub
+        end
+    end
+
+    local function paintChips()
+        for _, d in ipairs(chipDefs) do
+            local b = chips[d[1]]
+            local on = S.filter == d[1]
+            b.Text = d[2] .. " " .. tostring(S.counts[d[1]] or 0)
+            b.BackgroundColor3 = on and T.accent or T.panel2
+            b.TextColor3 = on and T.white or T.sub
+        end
+        sortBtn.Text = SORT_LABEL[S.sort]
+        countChip.Text = #S.entries .. " file"
+    end
+
+    -- layout adaptif: panel samping saat lebar >= 560, strip bawah saat sempit
+    local function relayoutFiles()
+        local wide = PF.AbsoluteSize.X >= 560
+        local compact = (not wide) and PF.AbsoluteSize.Y < 300
+        layout.wide, layout.compact = wide, compact
+        detail.Visible = not compact
+        if wide then
+            local sideW = 200
+            list.Position = UDim2.fromOffset(8, 66)
+            list.Size = UDim2.new(1, -(16 + sideW + 8), 1, -(66 + 42))
+            detail.AnchorPoint = Vector2.new(1, 0)
+            detail.Position = UDim2.new(1, -8, 0, 66)
+            detail.Size = UDim2.new(0, sideW, 1, -(66 + 42))
+            metaLbl.Size = UDim2.new(1, -20, 1, -64)
+            metaLbl.TextWrapped = true
+            metaLbl.TextTruncate = Enum.TextTruncate.None
+        elseif compact then
+            -- layar pendek (HP landscape): strip detail disembunyikan, ringkasan tampil di status bar
+            list.Position = UDim2.fromOffset(8, 66)
+            list.Size = UDim2.new(1, -16, 1, -(66 + 42))
+        else
+            list.Position = UDim2.fromOffset(8, 66)
+            list.Size = UDim2.new(1, -16, 1, -(66 + 42 + 42))
+            detail.AnchorPoint = Vector2.new(0, 0)
+            detail.Position = UDim2.new(0, 8, 1, -(42 + 38))
+            detail.Size = UDim2.new(1, -16, 0, 38)
+            metaLbl.Size = UDim2.new(1, -20, 0, 12)
+            metaLbl.TextWrapped = false
+            metaLbl.TextTruncate = Enum.TextTruncate.AtEnd
+        end
+        paintDetail()
+        renderList()
+    end
+    bind(PF:GetPropertyChangedSignal("AbsoluteSize"), relayoutFiles)
+
+    -- ---- event Files ----
+    bind(searchBox:GetPropertyChangedSignal("Text"), function()
+        S.query = searchBox.Text
+        clearBtn.Visible = S.query ~= ""
+        E.applyView()
     end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-            local d = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    bind(searchBox.Focused, function() tween(sstroke, 0.12, { Color = T.accent }) end)
+    bind(searchBox.FocusLost, function(enter)
+        tween(sstroke, 0.12, { Color = T.line })
+        if enter and #S.view == 0 and S.query ~= "" then
+            if E.addManual(S.query) then
+                searchBox.Text = ""
+            else
+                setStatus("Tidak ada file yang cocok dengan '" .. S.query .. "'.", "warn")
+            end
         end
     end)
+    bind(clearBtn.MouseButton1Click, function() searchBox.Text = "" end)
+
+    bind(sortBtn.MouseButton1Click, function()
+        local opts = {}
+        for _, s in ipairs(SORTS) do opts[#opts + 1] = { text = SORT_LABEL[s], value = s } end
+        dropdown(sortBtn, opts, S.sort, function(v)
+            S.sort = v
+            E.applyView()
+            E.saveSettings()
+        end)
+    end)
+    bind(scanBtn.MouseButton1Click, function() E.rescan(false) end)
+    bind(selAllBtn.MouseButton1Click, E.selectView)
+    bind(selNoneBtn.MouseButton1Click, E.clearSel)
+
+    bind(targetBtn.MouseButton1Click, function()
+        if S.busy then return end
+        local opts = {}
+        for _, t in ipairs(TARGETS) do opts[#opts + 1] = { text = t, value = t } end
+        dropdown(targetBtn, opts, S.target, function(v)
+            S.target = v
+            paintAction()
+            E.saveSettings()
+        end)
+    end)
+    bind(scriptsBtn.MouseButton1Click, function()
+        CONFIG.DisableScripts = not CONFIG.DisableScripts
+        paintAction()
+        E.saveSettings()
+        if H.settingsRefresh then H.settingsRefresh() end
+    end)
+    bind(undoBtn.MouseButton1Click, function() E.undo(false) end)
+    bind(importBtn.MouseButton1Click, function()
+        if S.busy then
+            E.cancel()
+            paintAction()
+            return
+        end
+        local l = E.selectedList()
+        if #l == 0 then
+            setStatus("Belum ada file dicentang. Tap baris untuk memilih.", "warn")
+            return
+        end
+        E.runBatch(l)
+    end)
+    bind(detailBtn.MouseButton1Click, function()
+        if S.focus and not S.busy then E.runBatch({ S.focus }) end
+    end)
+
+    -- ===============================================================
+    -- Halaman LOG
+    -- ===============================================================
+    local logTool = make("Frame", {
+        Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 28), BackgroundTransparency = 1,
+    }, PL)
+    local logClear = button(logTool, "Bersihkan", T.panel2, { Size = UDim2.fromOffset(90, 28), TextSize = 11 })
+    local logCopy = button(logTool, "Salin log", T.panel2, {
+        Position = UDim2.fromOffset(96, 0), Size = UDim2.fromOffset(90, 28), TextSize = 11,
+    })
+    local logList = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 40), Size = UDim2.new(1, -16, 1, -48), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, PL)
+    corner(logList, 8)
+    make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, logList)
+    make("UIPadding", {
+        PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5),
+        PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+    }, logList)
+
+    local logRows, logOrder = {}, 0
+    local function addLogRow(line)
+        local atBottom = logList.CanvasPosition.Y >= logList.AbsoluteCanvasSize.Y - logList.AbsoluteSize.Y - 24
+        logOrder = logOrder + 1
+        local l = label(logList, {
+            Text = "[" .. line.t .. "] " .. line.text, TextColor3 = KIND[line.kind] or T.text, TextSize = 11,
+            TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0),
+            LayoutOrder = logOrder,
+        })
+        logRows[#logRows + 1] = l
+        if #logRows > 150 then table.remove(logRows, 1):Destroy() end
+        if atBottom then
+            task.defer(function()
+                if alive() then logList.CanvasPosition = Vector2.new(0, 1e6) end
+            end)
+        end
+    end
+    bind(logClear.MouseButton1Click, function()
+        for _, l in ipairs(logRows) do l:Destroy() end
+        logRows = {}
+        S.log = {}
+    end)
+    bind(logCopy.MouseButton1Click, function()
+        local parts = {}
+        for _, l in ipairs(S.log) do parts[#parts + 1] = "[" .. l.t .. "] " .. l.text end
+        local clip = setclipboard or toclipboard
+        if clip and pcall(clip, table.concat(parts, "\n")) then
+            setStatus("Log disalin ke clipboard.", "ok")
+        else
+            setStatus("Executor tidak punya setclipboard.", "err")
+        end
+    end)
+
+    -- ===============================================================
+    -- Halaman PENGATURAN
+    -- ===============================================================
+    local setList = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 1, -12), BackgroundTransparency = 1,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, PS)
+    make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, setList)
+    make("UIPadding", { PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 8) }, setList)
+
+    local order = 0
+    local function nextOrder()
+        order = order + 1
+        return order
+    end
+    local refreshers = {}
+
+    local function section(text)
+        label(setList, {
+            Text = string.upper(text), TextColor3 = T.sub, Font = Enum.Font.GothamBold, TextSize = 10,
+            Size = UDim2.new(1, 0, 0, 18), LayoutOrder = nextOrder(),
+        })
+    end
+
+    local function switchRow(title, desc, key, onChange)
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = nextOrder(),
+        }, setList)
+        corner(row, 8)
+        label(row, {
+            Text = title, Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -68, 0, 16), Font = Enum.Font.GothamMedium,
+        })
+        label(row, {
+            Text = desc, Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -68, 0, 26), TextSize = 10,
+            TextColor3 = T.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+        })
+        local track = make("TextButton", {
+            Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0),
+            Size = UDim2.fromOffset(40, 22), BorderSizePixel = 0, BackgroundColor3 = T.line,
+        }, row)
+        corner(track, 11)
+        local knob = make("Frame", {
+            Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = T.white, BorderSizePixel = 0,
+        }, track)
+        corner(knob, 8)
+        local function paint()
+            local on = CONFIG[key] == true
+            tween(track, 0.12, { BackgroundColor3 = on and T.accent or T.line })
+            tween(knob, 0.12, { Position = UDim2.fromOffset(on and 21 or 3, 3) })
+        end
+        paint()
+        refreshers[#refreshers + 1] = paint
+        bind(track.MouseButton1Click, function()
+            CONFIG[key] = not CONFIG[key]
+            paint()
+            paintAction()
+            E.saveSettings()
+            if onChange then onChange() end
+        end)
+    end
+
+    local function actionRow(text, color, fn)
+        local b = button(setList, text, color, { Size = UDim2.new(1, 0, 0, 32), LayoutOrder = nextOrder() })
+        bind(b.MouseButton1Click, fn)
+    end
+
+    section("Scanner")
+    do
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = nextOrder(),
+        }, setList)
+        corner(row, 8)
+        label(row, {
+            Text = "Lingkup scan", Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -150, 0, 16),
+            Font = Enum.Font.GothamMedium,
+        })
+        label(row, {
+            Text = "Semua = seluruh workspace executor (rekursif). Folder = hanya " .. CONFIG.Folder .. ".",
+            Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -150, 0, 26), TextSize = 10,
+            TextColor3 = T.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+        })
+        local segAll = button(row, "Semua", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -72, 0.5, 0), Size = UDim2.fromOffset(58, 26), TextSize = 11,
+        })
+        local segFolder = button(row, "Folder", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(58, 26), TextSize = 11,
+        })
+        local function paint()
+            local all = CONFIG.ScanScope == "all"
+            segAll.BackgroundColor3 = all and T.accent or T.panel2
+            segFolder.BackgroundColor3 = all and T.panel2 or T.accent
+        end
+        paint()
+        refreshers[#refreshers + 1] = paint
+        local function pick(v)
+            CONFIG.ScanScope = v
+            paint()
+            E.saveSettings()
+            E.rescan(false)
+        end
+        bind(segAll.MouseButton1Click, function() pick("all") end)
+        bind(segFolder.MouseButton1Click, function() pick("folder") end)
+    end
+    switchRow("Auto-rescan", "Pindai ulang tiap " .. CONFIG.AutoScanInterval .. " detik di latar belakang, juga saat UI disembunyikan.", "AutoScan")
+    switchRow("Auto-import file baru", "File baru di folder " .. CONFIG.Folder .. " langsung diimport ke target (hati-hati).", "AutoImportNew")
+
+    section("Import")
+    switchRow("Matikan script", "Script di dalam file di-set Disabled saat diimport.", "DisableScripts")
+    switchRow("Pasang teks script", "Isi script ditulis ke editor bawaan Studio Lite (SL_CodeTextBox).", "InstallScriptText")
+    switchRow("Taruh di depan kamera", "Hanya untuk target Workspace. Batch otomatis diberi jarak.", "SpawnInFrontOfCamera")
+    switchRow("Sembunyikan UI setelah import", "UI menutup ke tombol SL kecil, hasilnya muncul sebagai notifikasi.", "AutoHideAfterImport")
+
+    section("Alat")
+    actionRow("Scan ulang sekarang", T.purple, function() E.rescan(false) end)
+    actionRow("Scan struktur script Studio Lite (diagnosa)", T.panel2, E.scanStudioLite)
+    actionRow("Salin script berikutnya dari import terakhir", T.panel2, E.copyNextScript)
+    actionRow("Undo semua batch", Color3.fromRGB(150, 90, 50), function() E.undo(true) end)
+    actionRow("Reset centang & status", T.panel2, function()
+        if S.busy then return end
+        S.selected, S.status, S.reason = {}, {}, {}
+        fire("selection")
+        setStatus("Centang dan status direset.", "info")
+    end)
+    actionRow("Unload script (tutup total)", Color3.fromRGB(170, 65, 65), function()
+        if env.__SLImporterCleanup then env.__SLImporterCleanup() end
+    end)
+
+    section("Info")
+    do
+        local function yn(f) return f and "ya" or "tidak" end
+        local exName = "?"
+        if identifyexecutor then
+            local ok, n, v = pcall(identifyexecutor)
+            if ok then exName = tostring(n) .. (v and (" " .. tostring(v)) or "") end
+        end
+        local info = string.format(
+            "Executor: %s\nlistfiles: %s | readfile: %s | writefile: %s\ngetcustomasset: %s | clipboard: %s\nFolder: %s | PlaceId: %s\nToggle UI (PC): %s",
+            exName, yn(listfiles), yn(readfile), yn(writefile), yn(getcustomasset or getsynasset),
+            yn(setclipboard or toclipboard), CONFIG.Folder, tostring(game.PlaceId), CONFIG.ToggleKey.Name)
+        local box = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 78), BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = nextOrder(),
+        }, setList)
+        corner(box, 8)
+        label(box, {
+            Text = info, Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 1, -12), TextSize = 10,
+            TextColor3 = T.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+        })
+    end
+
+    -- ===============================================================
+    -- Hook engine -> UI
+    -- ===============================================================
+    H.view = function()
+        paintChips()
+        renderList()
+    end
+    H.rows = refreshRows
+    H.selection = function()
+        refreshRows()
+        paintAction()
+        updateMini()
+    end
+    H.focus = function()
+        refreshRows()
+        paintDetail()
+    end
+    H.status = function(text, kind)
+        statusLbl.Text = text
+        statusLbl.TextColor3 = (kind == "info") and T.sub or (KIND[kind] or T.sub)
+    end
+    H.progress = function(frac, text)
+        W.prog = frac
+        tween(progFill, 0.15, { Size = UDim2.new(math.clamp(frac, 0, 1), 0, 1, 0) })
+        if text ~= "" then
+            statusLbl.Text = text
+            statusLbl.TextColor3 = T.sub
+        end
+        updateMini()
+    end
+    H.busy = function()
+        paintAction()
+        paintDetail()
+        updateMini()
+    end
+    H.history = paintAction
+    H.scanning = function(on)
+        scanBtn.Text = on and "..." or "Scan"
+        renderList()
+    end
+    H.toast = toast
+    H.log = addLogRow
+    H.autohide = hideWindow
+    H.settingsRefresh = function()
+        for _, f in ipairs(refreshers) do f() end
+    end
+
+    -- ---- Mulai ----
+    paintChips()
+    paintAction()
+    paintDetail()
+    setTab("files")
+    applyRect(false)
+    relayoutFiles()
+    task.defer(function()
+        if alive() then relayoutFiles() end
+    end)
+    E.applyView()
+    if not CONFIG.StudioLitePlaceIds[game.PlaceId] then
+        logLine("PlaceId " .. tostring(game.PlaceId) .. " bukan Studio Lite resmi, tetap bisa dipakai.", "warn")
+    end
+    setStatus("Siap. Memindai file...", "info")
+    E.rescan(false)
 end
 
 ensureFolder()
-refreshList()
-if not CONFIG.StudioLitePlaceIds[game.PlaceId] then
-    setStatus("PlaceId " .. tostring(game.PlaceId) .. " bukan Studio Lite resmi, tetap bisa dipakai. " .. status.Text, INFO)
+E.loadSettings()
+local okGui, errGui = pcall(buildGui)
+if not okGui then
+    warn("[SLImporter] GUI gagal dibuat: " .. tostring(errGui))
 end
