@@ -1,5 +1,5 @@
 --[[
-    Studio Lite RBXM/RBXMX Importer  (Delta executor)
+    Studio Lite RBXM/RBXMX Importer v2  (Delta executor)
     Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
 
     Cara pakai
@@ -8,21 +8,43 @@
       2. Masuk ke Studio Lite, execute script ini lewat Delta
       3. Pilih file di GUI, pilih target, tekan Import
 
+    Yang baru di v2 (teks script ikut masuk)
+      - Penyebab teks kosong: editor Studio Lite tidak membaca Script.Source. Teks disimpan
+        di TextBox "SL_CodeTextBox" (anak dari script) + penampung "SaveChangesTo".
+        Script buatan Instance.new() tidak punya struktur itu, jadi editornya kosong.
+      - Sekarang tiap Script / LocalScript / ModuleScript hasil import diberi struktur editor
+        yang di-clone dari script bawaan Studio Lite, lalu diisi teks aslinya.
+      - Teks diambil langsung dari ISI FILE: parser rbxmx (XML) dan parser rbxm biner
+        (chunk INST/PROP/PRNT + LZ4) bawaan script ini. Tidak butuh decompile atau
+        Script.Source, jadi rbxm biner pun lengkap.
+      - Tombol "Scan" mencatat struktur script bawaan Studio Lite ke
+        StudioLiteImports/scan_studio_lite.txt (juga disalin ke clipboard). Kalau teks
+        masih kosong setelah import, kirim isi file itu untuk disesuaikan.
+      - Setiap import menulis StudioLiteImports/import_log.txt (hasil per script).
+      - Script yang gagal dipasang otomatis masih bisa disalin lewat tombol "Salin script"
+        atau diambil dari folder scripts_out.
+
     Cara kerja loader
       - Jalur utama : game:GetObjects(getcustomasset(path))  -> mendukung .rbxm dan .rbxmx
       - Fallback    : parser rbxmx bawaan (XML) kalau getcustomasset tidak tersedia.
                       rbxm biner TIDAK bisa lewat fallback; simpan ulang sebagai .rbxmx.
+                      Fallback XML tidak membawa Attributes / Tags / properti langka.
 
     Catatan
-      - Objek dibuat di sisi client. Studio Lite menyimpan lewat server, jadi hasil import
-        bisa saja hanya terlihat di layarmu dan tidak ikut tersimpan / publish.
+      - Objek dibuat di sisi client. Dari dump game, proses Save Studio Lite membaca workspace
+        lokal (CloneLocal -> Convert -> kirim ke server), jadi hasil import yang tampil di
+        Explorer seharusnya ikut tersimpan. Cek sekali dengan Save lalu Open.
       - Script di dalam file dimatikan (Disabled = true) secara default.
+      - Struktur editor diambil dari script bawaan di game. Kalau tidak ada satu pun yang
+        terbaca (belum pernah insert script), insert satu script lewat menu Studio Lite
+        dulu lalu import ulang.
 ]]
 
 local CONFIG = {
     Folder = "StudioLiteImports",
     DisableScripts = true,
     SpawnInFrontOfCamera = true,
+    InstallScriptText = true,   -- pasang teks script ke editor Studio Lite
     StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true },
 }
 
@@ -172,10 +194,20 @@ local function convertValue(p)
         if not n then return false end
         return true, BrickColor.new(n)
     elseif t == "Content" then
-        local u = xmlChild(p, "url")
+        local u = xmlChild(p, "url") or xmlChild(p, "uri")
         local s = (u and u.text) or p.text
         if not s or s == "" or s == "null" then return false end
         return true, s
+    elseif t == "NumberRange" then
+        local a, b = (p.text or ""):match("(%S+)%s+(%S+)")
+        if not (tonumber(a) and tonumber(b)) then return false end
+        return true, NumberRange.new(tonumber(a), tonumber(b))
+    elseif t == "Rect2D" or t == "Rect" then
+        local mn, mx = xmlChild(p, "min"), xmlChild(p, "max")
+        if not (mn and mx) then return false end
+        return true, Rect.new(xmlNum(mn, "X"), xmlNum(mn, "Y"), xmlNum(mx, "X"), xmlNum(mx, "Y"))
+    elseif t == "Vector3int16" then
+        return true, Vector3int16.new(xmlNum(p, "X"), xmlNum(p, "Y"), xmlNum(p, "Z"))
     elseif t == "NumberSequence" then
         local keys = {}
         for a, b, c in (p.text or ""):gmatch("(%S+)%s+(%S+)%s+(%S+)") do
@@ -257,6 +289,257 @@ local function parseRbxmx(text)
     if #out == 0 then return nil, "tidak ada instance di dalam file" end
     return out
 end
+
+-- ===== Pohon ringan (class, name, source, children) dari file =====
+-- Teks script dibaca LANGSUNG dari isi file (XML maupun biner), jadi tidak
+-- bergantung pada Script.Source / decompile milik executor.
+
+local SCRIPT_CLASSES = { Script = true, LocalScript = true, ModuleScript = true }
+
+local function xmlToNodes(parent)
+    local out = {}
+    for _, c in ipairs(parent.children) do
+        if c.name == "Item" then
+            local node = { class = (c.attrs and c.attrs.class) or "Item" }
+            node.name = node.class
+            local props = xmlChild(c, "Properties")
+            if props then
+                for _, p in ipairs(props.children) do
+                    local pn = p.attrs and p.attrs.name
+                    if pn == "Name" then
+                        node.name = p.text or node.name
+                    elseif pn == "Source" then
+                        node.source = p.text or ""
+                    end
+                end
+            end
+            node.children = xmlToNodes(c)
+            out[#out + 1] = node
+        end
+    end
+    return out
+end
+
+local function parseXmlTree(text)
+    if text:sub(1, 3) == "\239\187\191" then text = text:sub(4) end -- buang BOM
+    local root = xmlParse(text)
+    local rbx
+    for _, c in ipairs(root.children) do
+        if c.name == "roblox" then rbx = c end
+    end
+    if not rbx then error("bukan file rbxmx yang valid") end
+    return xmlToNodes(rbx)
+end
+
+-- ---- Parser rbxm biner (hanya Name + Source + hierarki) ----
+
+local unpackFn = table.unpack or unpack
+
+local function rdU32(s, p)
+    local a, b, c, d = s:byte(p, p + 3)
+    if not d then error("data rbxm terpotong") end
+    return a + b * 256 + c * 65536 + d * 16777216
+end
+
+-- LZ4 block decompress (format yang dipakai chunk rbxm)
+local function lz4Decompress(src, pos, len, outLen)
+    local byte = string.byte
+    local out, n = {}, 0
+    local stop = pos + len
+    if stop - 1 > #src then error("data rbxm terpotong") end
+    while pos < stop do
+        local token = byte(src, pos)
+        pos = pos + 1
+        local lit = math.floor(token / 16)
+        if lit == 15 then
+            local b
+            repeat
+                b = byte(src, pos)
+                if not b then error("LZ4 rusak (literal)") end
+                pos = pos + 1
+                lit = lit + b
+            until b ~= 255
+        end
+        for i = 0, lit - 1 do
+            n = n + 1
+            out[n] = byte(src, pos + i)
+        end
+        pos = pos + lit
+        if pos >= stop then break end
+
+        local off = byte(src, pos) + byte(src, pos + 1) * 256
+        pos = pos + 2
+        local mlen = token % 16
+        if mlen == 15 then
+            local b
+            repeat
+                b = byte(src, pos)
+                if not b then error("LZ4 rusak (match)") end
+                pos = pos + 1
+                mlen = mlen + b
+            until b ~= 255
+        end
+        mlen = mlen + 4
+        local from = n - off
+        if off == 0 or from < 0 then error("LZ4 rusak (offset)") end
+        for i = 1, mlen do
+            n = n + 1
+            out[n] = out[from + i]
+        end
+    end
+    if outLen and n ~= outLen then
+        error(string.format("ukuran dekompresi tidak cocok (%d != %d)", n, outLen))
+    end
+    local parts = {}
+    for i = 1, n, 2048 do
+        parts[#parts + 1] = string.char(unpackFn(out, i, math.min(i + 2047, n)))
+    end
+    return table.concat(parts)
+end
+
+-- array int32 ter-interleave (+ zigzag, opsional delta) -> array angka, posisi berikutnya
+local function rdIntArray(s, p, count, delta)
+    local byte = string.byte
+    local res = {}
+    for i = 0, count - 1 do
+        local b0 = byte(s, p + i)
+        local b1 = byte(s, p + count + i)
+        local b2 = byte(s, p + 2 * count + i)
+        local b3 = byte(s, p + 3 * count + i)
+        if not b3 then error("array referent terpotong") end
+        local v = b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+        if v % 2 == 0 then v = math.floor(v / 2) else v = -math.floor((v + 1) / 2) end
+        res[i + 1] = v
+    end
+    if delta then
+        local acc = 0
+        for i = 1, count do
+            acc = acc + res[i]
+            res[i] = acc
+        end
+    end
+    return res, p + count * 4
+end
+
+local RBXM_MAGIC = "<roblox!\137\255\13\10\26\10"
+
+local function parseBinaryTree(data)
+    if data:sub(1, 14) ~= RBXM_MAGIC then error("header rbxm tidak dikenal") end
+    local pos = 33 -- 14 magic + 2 versi + 4 jumlah class + 4 jumlah instance + 8 cadangan
+    local classes = {}
+    local nodes = {}
+    local roots = {}
+    local total = #data
+
+    while pos + 15 <= total do
+        local cname = data:sub(pos, pos + 3)
+        local clen = rdU32(data, pos + 4)
+        local ulen = rdU32(data, pos + 8)
+        pos = pos + 16
+
+        local payload
+        if clen == 0 then
+            payload = data:sub(pos, pos + ulen - 1)
+            if #payload ~= ulen then error("data rbxm terpotong") end
+            pos = pos + ulen
+        else
+            if data:byte(pos) == 0x28 and data:byte(pos + 1) == 0xB5 and data:byte(pos + 2) == 0x2F then
+                error("chunk rbxm terkompres zstd (belum didukung), simpan ulang sebagai .rbxmx")
+            end
+            payload = lz4Decompress(data, pos, clen, ulen)
+            pos = pos + clen
+        end
+
+        if cname == "INST" then
+            local p = 1
+            local classId = rdU32(payload, p); p = p + 4
+            local nameLen = rdU32(payload, p); p = p + 4
+            local className = payload:sub(p, p + nameLen - 1); p = p + nameLen
+            p = p + 1 -- flag service
+            local count = rdU32(payload, p); p = p + 4
+            local refs = rdIntArray(payload, p, count, true)
+            local list = {}
+            for i = 1, count do
+                local node = { class = className, name = className, children = {} }
+                nodes[refs[i]] = node
+                list[i] = node
+            end
+            classes[classId] = list
+        elseif cname == "PROP" then
+            local p = 1
+            local classId = rdU32(payload, p); p = p + 4
+            local nameLen = rdU32(payload, p); p = p + 4
+            local propName = payload:sub(p, p + nameLen - 1); p = p + nameLen
+            local typeId = payload:byte(p); p = p + 1
+            local list = classes[classId]
+            if typeId == 1 and list and (propName == "Name" or propName == "Source") then
+                for i = 1, #list do
+                    local l = rdU32(payload, p); p = p + 4
+                    local str = payload:sub(p, p + l - 1); p = p + l
+                    if propName == "Name" then
+                        list[i].name = str
+                    else
+                        list[i].source = str
+                    end
+                end
+            end
+        elseif cname == "PRNT" then
+            local p = 2 -- lewati byte versi
+            local count = rdU32(payload, p); p = p + 4
+            local children, parents
+            children, p = rdIntArray(payload, p, count, true)
+            parents = rdIntArray(payload, p, count, true)
+            for i = 1, count do
+                local child = nodes[children[i]]
+                if child then
+                    local parent = nodes[parents[i]]
+                    if parent then
+                        parent.children[#parent.children + 1] = child
+                    else
+                        roots[#roots + 1] = child
+                    end
+                end
+            end
+        elseif cname == "END\0" then
+            break
+        end
+    end
+    if #roots == 0 then error("tidak ada instance di dalam file") end
+    return roots
+end
+
+local function parseTree(data)
+    if data:sub(1, 8) == "<roblox!" then return parseBinaryTree(data) end
+    return parseXmlTree(data)
+end
+
+-- Cocokkan pohon file dengan instance hasil GetObjects / parser XML, ambil semua script
+local function matchScripts(instList, nodeList, prefix, out)
+    local used = {}
+    for i, node in ipairs(nodeList) do
+        local inst = instList[i]
+        if not inst or used[inst] or inst.ClassName ~= node.class or inst.Name ~= node.name then
+            inst = nil
+            for _, cand in ipairs(instList) do
+                if not used[cand] and cand.ClassName == node.class and cand.Name == node.name then
+                    inst = cand
+                    break
+                end
+            end
+        end
+        if inst then
+            used[inst] = true
+            local path = (prefix == "") and node.name or (prefix .. "/" .. node.name)
+            if SCRIPT_CLASSES[node.class] then
+                out[#out + 1] = {
+                    inst = inst, class = node.class, name = node.name,
+                    path = path, source = node.source or "",
+                }
+            end
+            matchScripts(inst:GetChildren(), node.children, path, out)
+        end
+    end
+end
 -- [[PARSER END]]
 
 -- File & import logic
@@ -287,7 +570,14 @@ local function listImportFiles()
     return out
 end
 
+-- return: objs, cara, isi file (string / nil)
 local function loadFile(path)
+    local data
+    if readfile then
+        local okr, d = pcall(readfile, path)
+        if okr and type(d) == "string" then data = d end
+    end
+
     local getAsset = getcustomasset or getsynasset
     local nativeErr = "getcustomasset tidak tersedia"
     if getAsset then
@@ -295,22 +585,84 @@ local function loadFile(path)
             return game:GetObjects(getAsset(path))
         end)
         if ok and type(res) == "table" and #res > 0 then
-            return res, "GetObjects"
+            return res, "GetObjects", data
         end
         nativeErr = tostring(res)
     end
 
-    if not readfile then return nil, "executor tidak punya readfile" end
-    local okr, data = pcall(readfile, path)
-    if not okr or type(data) ~= "string" then
-        return nil, "gagal baca file: " .. tostring(data)
-    end
+    if not data then return nil, "gagal baca file (readfile tidak ada / file tidak terbaca)" end
     if data:sub(1, 8) == "<roblox!" then
         return nil, "rbxm biner butuh getcustomasset (" .. nativeErr .. "). Simpan ulang sebagai .rbxmx lalu coba lagi."
     end
     local objs, err = parseRbxmx(data)
-    if objs then return objs, "parser rbxmx" end
+    if objs then return objs, "parser rbxmx", data end
     return nil, err
+end
+
+-- Kumpulkan teks script. Sumber utama: isi file (XML maupun biner) lewat parseTree,
+-- dicocokkan ke instance hasil import. Cadangan kalau file gagal diparse:
+-- best effort lewat instance (Source / gethiddenproperty / decompile).
+local function gatherScripts(data, objs)
+    local parseErr
+    if data then
+        local ok, roots = pcall(parseTree, data)
+        if ok and type(roots) == "table" then
+            local out = {}
+            matchScripts(objs, roots, "", out)
+            return out, nil
+        end
+        parseErr = tostring(roots)
+    end
+
+    local scripts = {}
+    for _, obj in ipairs(objs) do
+        local list = obj:GetDescendants()
+        table.insert(list, obj)
+        for _, d in ipairs(list) do
+            if d:IsA("LuaSourceContainer") then
+                local src, decompiled
+                pcall(function() src = d.Source end)
+                if (type(src) ~= "string" or src == "") and gethiddenproperty then
+                    pcall(function() src = gethiddenproperty(d, "Source") end)
+                end
+                if (type(src) ~= "string" or src == "") and decompile then
+                    pcall(function() src = decompile(d) end)
+                    decompiled = true
+                end
+                if type(src) ~= "string" then src = "" end
+                if decompiled and src ~= "" then
+                    src = "-- hasil decompile, mungkin tidak persis sama dengan aslinya\n" .. src
+                end
+                scripts[#scripts + 1] = {
+                    inst = d, class = d.ClassName, name = d.Name, path = d:GetFullName(), source = src,
+                }
+            end
+        end
+    end
+    return scripts, parseErr
+end
+
+local function safeName(s)
+    return (s:gsub("[^%w_%-]", "_"))
+end
+
+-- Tulis tiap script ke file .lua (cadangan kalau clipboard tidak ada)
+local function exportScripts(path, scripts)
+    if #scripts == 0 or not writefile then return nil end
+    local base = displayName(path):gsub("%.rbxmx?$", "")
+    base = safeName(base)
+    local dir = CONFIG.Folder .. "/scripts_out"
+    if makefolder and isfolder then
+        if not isfolder(dir) then pcall(makefolder, dir) end
+        dir = dir .. "/" .. base
+        if not isfolder(dir) then pcall(makefolder, dir) end
+    else
+        dir = dir .. "_" .. base
+    end
+    for i, s in ipairs(scripts) do
+        pcall(writefile, string.format("%s/%02d_%s.lua", dir, i, safeName(s.name)), s.source)
+    end
+    return dir
 end
 
 local function sanitize(obj)
@@ -335,13 +687,343 @@ local function placeInFront(obj)
     end
 end
 
+-- ===== Pemasang teks script untuk Studio Lite =====
+-- Dari dump game: editor Studio Lite TIDAK memakai Script.Source. Teks script disimpan
+-- di objek TextBox bernama SL_CodeTextBox yang jadi anak dari script, dan editor menulis
+-- balik lewat ObjectValue "SaveChangesTo" (SaveChangesTo.Value.Text = teks). Script yang
+-- dibuat Instance.new() tidak punya struktur itu, makanya editor kelihatan kosong.
+-- Solusi: salin struktur itu dari script bawaan Studio Lite, lalu isi teksnya.
+
+local HOLDER_BOX = "SL_CodeTextBox"
+local HOLDER_PTR = "SaveChangesTo"
+local MARK = "_SLI_mark"
+
+local function setMark(inst, v)
+    pcall(function() inst:SetAttribute(MARK, v) end)
+end
+
+local function hasMark(inst, v)
+    local ok, cur = pcall(function() return inst:GetAttribute(MARK) end)
+    return ok and (cur == v or cur == "both")
+end
+
+local function findMarked(root, v)
+    if hasMark(root, v) then return root end
+    for _, d in ipairs(root:GetDescendants()) do
+        if hasMark(d, v) then return d end
+    end
+    return nil
+end
+
+local function clearMarks(root)
+    setMark(root, nil)
+    for _, d in ipairs(root:GetDescendants()) do setMark(d, nil) end
+end
+
+local function nativeRoots()
+    local roots = {}
+    for _, name in ipairs({ "ReplicatedStorage", "Workspace", "StarterGui", "StarterPack", "Lighting", "ReplicatedFirst" }) do
+        local ok, svc = pcall(function() return game:GetService(name) end)
+        if ok and svc then roots[#roots + 1] = svc end
+    end
+    return roots
+end
+
+-- script bawaan Studio Lite = LuaSourceContainer yang punya TextBox SL_CodeTextBox
+local function findNativeTemplates()
+    local found, seen = {}, {}
+    for _, root in ipairs(nativeRoots()) do
+        local ok, list = pcall(function() return root:GetDescendants() end)
+        if ok then
+            for _, d in ipairs(list) do
+                if d.Name == HOLDER_BOX and d:IsA("TextBox") and not seen[d] then
+                    local owner = d.Parent
+                    while owner and not owner:IsA("LuaSourceContainer") do owner = owner.Parent end
+                    if owner then
+                        seen[d] = true
+                        found[#found + 1] = { owner = owner, box = d }
+                    end
+                end
+            end
+        end
+    end
+    return found
+end
+
+local function pickTemplate(list, class)
+    for _, t in ipairs(list) do
+        if t.owner.ClassName == class then return t end
+    end
+    return list[1]
+end
+
+-- Siapkan prototipe yang akan di-clone ke tiap script hasil import
+local function buildInstaller(t)
+    local owner, box = t.owner, t.box
+    local ptr = box:FindFirstChild(HOLDER_PTR)
+    local target
+    if ptr and ptr:IsA("ObjectValue") then target = ptr.Value end
+
+    local function branchOf(inst)
+        local cur = inst
+        while cur and cur.Parent ~= owner do cur = cur.Parent end
+        return cur
+    end
+    local boxBranch = branchOf(box)
+    local targetBranch
+    if target then
+        targetBranch = target:IsDescendantOf(owner) and branchOf(target) or target
+    end
+
+    if target == box then
+        setMark(box, "both")
+    else
+        setMark(box, "box")
+        if target then setMark(target, "target") end
+    end
+    local protoBox = boxBranch and boxBranch:Clone()
+    local protoTarget
+    if targetBranch and targetBranch ~= boxBranch then protoTarget = targetBranch:Clone() end
+    setMark(box, nil)
+    if target then setMark(target, nil) end
+
+    if not protoBox then return nil, "clone SL_CodeTextBox gagal (Archivable mati?)" end
+    return { protoBox = protoBox, protoTarget = protoTarget }
+end
+
+local function writeText(obj, src)
+    if not obj then return false end
+    local ok = pcall(function()
+        if obj:IsA("ValueBase") then obj.Value = src else obj.Text = src end
+    end)
+    if not ok then return false end
+    local back
+    pcall(function()
+        if obj:IsA("ValueBase") then back = obj.Value else back = obj.Text end
+    end)
+    return back == src
+end
+
+-- return: berhasil?, keterangan
+local function installOne(installer, s)
+    local inst = s.inst
+    if not inst then return false, "instance tidak ditemukan" end
+    local src = s.source or ""
+    src = src:gsub("\r\n", "\n")
+    src = src:gsub("\r", "\n")
+    local box, holder
+
+    local existing = inst:FindFirstChild(HOLDER_BOX)
+    if existing and existing:IsA("TextBox") then
+        -- file ini sudah membawa struktur editor Studio Lite (hasil simpan dari Studio Lite)
+        if src == "" then return true, "editor bawaan sudah ada, tidak diubah" end
+        box = existing
+        local p = existing:FindFirstChild(HOLDER_PTR)
+        if p and p:IsA("ObjectValue") then holder = p.Value end
+    else
+        local bb = installer.protoBox:Clone()
+        if not bb then return false, "clone editor gagal" end
+        bb.Parent = inst
+        box = findMarked(bb, "box")
+        holder = findMarked(bb, "target")
+        local extra
+        if not holder and installer.protoTarget then
+            extra = installer.protoTarget:Clone()
+            if extra then
+                extra.Parent = inst
+                holder = findMarked(extra, "target")
+            end
+        end
+        clearMarks(bb)
+        if extra then clearMarks(extra) end
+        if not box then return false, "SL_CodeTextBox tidak ketemu di hasil clone" end
+        local ptr = box:FindFirstChild(HOLDER_PTR)
+        if ptr and ptr:IsA("ObjectValue") and holder then
+            pcall(function() ptr.Value = holder end)
+        end
+    end
+
+    -- teks polos ke SEMUA penampung (kalau SL_CodeTextBox sendiri penampungnya, itu sudah cukup)
+    local okBox = writeText(box, src)
+    local okHolder = true
+    if holder and holder ~= box then okHolder = writeText(holder, src) end
+    if not okBox then return false, "gagal menulis teks ke SL_CodeTextBox (terlalu panjang?)" end
+    if not okHolder then return false, "gagal menulis teks ke penampung SaveChangesTo" end
+    return true, "ok"
+end
+
+-- return: { ok = n, fail = n, firstReason = str|nil, notes = { [i] = "..." } }
+local function installScriptText(list)
+    local stats = { ok = 0, fail = 0, notes = {} }
+    if #list == 0 then return stats end
+
+    local templates = findNativeTemplates()
+    if #templates == 0 then
+        stats.fail = #list
+        stats.firstReason = "script bawaan Studio Lite (SL_CodeTextBox) tidak ditemukan, buka/insert satu script dulu lalu tekan Scan"
+        for i = 1, #list do stats.notes[i] = stats.firstReason end
+        return stats
+    end
+
+    local cache = {}
+    for i, s in ipairs(list) do
+        local t = pickTemplate(templates, s.class)
+        local installer = cache[t]
+        local ierr
+        if installer == nil then
+            installer, ierr = buildInstaller(t)
+            cache[t] = installer or false
+        elseif installer == false then
+            ierr = "prototipe editor tidak bisa dibuat"
+        end
+        local ok, why
+        if installer then
+            local okc, a, b = pcall(installOne, installer, s)
+            if okc then ok, why = a, b else ok, why = false, tostring(a) end
+        else
+            ok, why = false, ierr or "prototipe editor tidak bisa dibuat"
+        end
+        stats.notes[i] = why
+        if ok then
+            stats.ok = stats.ok + 1
+        else
+            stats.fail = stats.fail + 1
+            stats.firstReason = stats.firstReason or why
+        end
+    end
+    return stats
+end
+
+-- ===== Scan: catat struktur script bawaan Studio Lite (buat diagnosa) =====
+
+local function oneLine(s, n)
+    s = tostring(s):gsub("[\r\n]+", " / ")
+    if #s > n then s = s:sub(1, n) .. "..." end
+    return s
+end
+
+local function describe(inst)
+    local info = inst.ClassName .. "  " .. inst.Name
+    if inst:IsA("GuiObject") then
+        info = info .. "  Visible=" .. tostring(inst.Visible)
+    end
+    if inst:IsA("TextBox") or inst:IsA("TextLabel") or inst:IsA("TextButton") then
+        info = info .. string.format("  RichText=%s  Text(%d)=\"%s\"",
+            tostring(inst.RichText), #inst.Text, oneLine(inst.Text, 70))
+    elseif inst:IsA("ObjectValue") then
+        info = info .. "  -> " .. (inst.Value and inst.Value:GetFullName() or "nil")
+    elseif inst:IsA("StringValue") then
+        info = info .. string.format("  Value(%d)=\"%s\"", #inst.Value, oneLine(inst.Value, 70))
+    elseif inst:IsA("ValueBase") then
+        info = info .. "  Value=" .. tostring(inst.Value)
+    elseif inst:IsA("LuaSourceContainer") then
+        local dis
+        pcall(function() dis = inst.Disabled end)
+        if dis ~= nil then info = info .. "  Disabled=" .. tostring(dis) end
+    end
+    local okA, attrs = pcall(function() return inst:GetAttributes() end)
+    if okA and next(attrs) then
+        local parts = {}
+        for k, v in pairs(attrs) do parts[#parts + 1] = k .. "=" .. oneLine(v, 30) end
+        table.sort(parts)
+        info = info .. "  attrs{" .. table.concat(parts, ", ") .. "}"
+    end
+    return info
+end
+
+local function dumpTree(inst, depth, maxDepth, lines)
+    for _, c in ipairs(inst:GetChildren()) do
+        lines[#lines + 1] = string.rep("  ", depth) .. describe(c)
+        if depth < maxDepth then dumpTree(c, depth + 1, maxDepth, lines) end
+    end
+end
+
+local function scanNative()
+    local templates = findNativeTemplates()
+    local lines = {
+        "# Scan script bawaan Studio Lite",
+        "PlaceId: " .. tostring(game.PlaceId),
+        "Template (SL_CodeTextBox): " .. #templates,
+        "",
+    }
+    local seenOwner, shown = {}, 0
+    for _, t in ipairs(templates) do
+        if not seenOwner[t.owner] and shown < 25 then
+            seenOwner[t.owner] = true
+            shown = shown + 1
+            lines[#lines + 1] = "== " .. t.owner:GetFullName() .. "  [" .. t.owner.ClassName .. "]"
+            dumpTree(t.owner, 1, 5, lines)
+            lines[#lines + 1] = ""
+        end
+    end
+
+    -- script di Workspace yang TIDAK punya SL_CodeTextBox (buat lihat bentuk lain)
+    local others = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("LuaSourceContainer") and not d:FindFirstChild(HOLDER_BOX) and others < 10 then
+            others = others + 1
+            if others == 1 then lines[#lines + 1] = "== Script di Workspace tanpa SL_CodeTextBox" end
+            lines[#lines + 1] = d:GetFullName() .. "  [" .. d.ClassName .. "]"
+            dumpTree(d, 1, 2, lines)
+        end
+    end
+
+    local report = table.concat(lines, "\n")
+    local saved
+    if writefile then
+        ensureFolder()
+        local p = CONFIG.Folder .. "/scan_studio_lite.txt"
+        if pcall(writefile, p, report) then saved = p end
+    end
+    local clip = setclipboard or toclipboard
+    local copied = clip and pcall(clip, report)
+
+    local msg = string.format("Scan: %d template ditemukan.", #templates)
+    if saved then msg = msg .. " Disimpan: " .. saved .. "." end
+    if copied then msg = msg .. " Hasil juga disalin ke clipboard." end
+    return msg
+end
+
+-- Catat hasil import per script (buat cek kalau ada yang gagal)
+local function writeImportLog(path, scripts, stats, parseErr)
+    if not writefile then return nil end
+    local lines = { "# Import log: " .. displayName(path), "script: " .. #scripts }
+    if parseErr then lines[#lines + 1] = "peringatan baca file: " .. parseErr end
+    for i, s in ipairs(scripts) do
+        lines[#lines + 1] = string.format("[%d] %s (%s) %d byte -> %s",
+            i, s.path, s.class, #s.source, tostring(stats.notes[i] or "teks tidak dipasang"))
+    end
+    local p = CONFIG.Folder .. "/import_log.txt"
+    if pcall(writefile, p, table.concat(lines, "\n")) then return p end
+    return nil
+end
+
 local TARGETS = { "Workspace", "ReplicatedStorage", "StarterGui", "StarterPack", "Lighting" }
 local targetIndex = 1
 local lastImported = {}
+local scriptList = {}
+local scriptIdx = 0
 
 local function doImport(path)
-    local objs, how = loadFile(path)
+    local objs, how, data = loadFile(path)
     if not objs then return false, how end
+
+    local parseErr
+    scriptList, parseErr = gatherScripts(data, objs)
+    scriptIdx = 0
+    local outDir = exportScripts(path, scriptList)
+
+    -- pasang teks script SEBELUM objek dimasukkan ke game (struktur editor Studio Lite)
+    local stats = { ok = 0, fail = 0, notes = {} }
+    if CONFIG.InstallScriptText and #scriptList > 0 then
+        local oki, res = pcall(installScriptText, scriptList)
+        if oki then
+            stats = res
+        else
+            stats.fail = #scriptList
+            stats.firstReason = tostring(res)
+        end
+    end
 
     local target = game:GetService(TARGETS[targetIndex])
     local added = {}
@@ -354,8 +1036,27 @@ local function doImport(path)
         if ok then added[#added + 1] = obj end
     end
     lastImported = added
-    return true, string.format("Berhasil: %d objek dari %s -> %s (via %s)",
+
+    local logPath = writeImportLog(path, scriptList, stats, parseErr)
+
+    local msg = string.format("Berhasil: %d objek dari %s -> %s (via %s).",
         #added, displayName(path), TARGETS[targetIndex], how)
+    if #scriptList > 0 then
+        if CONFIG.InstallScriptText then
+            msg = msg .. string.format(" Teks script terpasang: %d/%d.", stats.ok, #scriptList)
+            if stats.fail > 0 then
+                msg = msg .. " Gagal: " .. tostring(stats.firstReason) .. "."
+            end
+        else
+            msg = msg .. string.format(" %d script (teks tidak dipasang, pakai tombol Salin).", #scriptList)
+        end
+        if parseErr then msg = msg .. " Peringatan baca file: " .. parseErr:sub(1, 80) .. "." end
+        if stats.fail > 0 or parseErr then
+            if logPath then msg = msg .. " Log: " .. logPath end
+        end
+        if outDir and stats.fail > 0 then msg = msg .. " Cadangan .lua: " .. outDir end
+    end
+    return true, msg
 end
 
 -- GUI
@@ -410,8 +1111,8 @@ end
 env.__SLImporterGui = gui
 
 local frame = make("Frame", {
-    Size = UDim2.new(0, 300, 0, 356),
-    Position = UDim2.new(0.5, -150, 0.5, -178),
+    Size = UDim2.new(0, 300, 0, 392),
+    Position = UDim2.new(0.5, -150, 0.5, -196),
     BackgroundColor3 = Color3.fromRGB(28, 30, 38),
     BorderSizePixel = 0,
 }, gui)
@@ -441,12 +1142,12 @@ local ERR = Color3.fromRGB(240, 110, 110)
 
 local status = make("TextLabel", {
     Text = "",
-    Position = UDim2.new(0, 10, 0, 38),
-    Size = UDim2.new(0, 280, 0, 40),
+    Position = UDim2.new(0, 10, 0, 36),
+    Size = UDim2.new(0, 280, 0, 66),
     BackgroundTransparency = 1,
     TextColor3 = INFO,
     Font = Enum.Font.Gotham,
-    TextSize = 12,
+    TextSize = 11,
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -458,8 +1159,8 @@ local function setStatus(text, color)
 end
 
 local list = make("ScrollingFrame", {
-    Position = UDim2.new(0, 10, 0, 82),
-    Size = UDim2.new(0, 280, 0, 128),
+    Position = UDim2.new(0, 10, 0, 106),
+    Size = UDim2.new(0, 280, 0, 104),
     BackgroundColor3 = Color3.fromRGB(20, 22, 28),
     BorderSizePixel = 0,
     ScrollBarThickness = 4,
@@ -490,10 +1191,12 @@ local scriptBtn = button(frame, "", 154, 248, 136, 28)
 local refreshBtn = button(frame, "Refresh", 10, 282, 86, 32)
 local importBtn = button(frame, "Import", 104, 282, 98, 32, Color3.fromRGB(46, 140, 90))
 local undoBtn = button(frame, "Undo", 210, 282, 80, 32, Color3.fromRGB(150, 90, 50))
+local copyBtn = button(frame, "Salin script: -", 10, 320, 190, 32, Color3.fromRGB(60, 90, 160))
+local scanBtn = button(frame, "Scan", 206, 320, 84, 32, Color3.fromRGB(90, 70, 150))
 
 make("TextLabel", {
     Text = "Folder: Delta/Workspace/" .. CONFIG.Folder,
-    Position = UDim2.new(0, 10, 0, 322),
+    Position = UDim2.new(0, 10, 0, 358),
     Size = UDim2.new(0, 280, 0, 28),
     BackgroundTransparency = 1,
     TextColor3 = Color3.fromRGB(130, 135, 150),
@@ -567,6 +1270,48 @@ local function resolvePath()
     return selectedPath
 end
 
+local function updateCopyBtn()
+    local n = #scriptList
+    if n == 0 then
+        copyBtn.Text = "Salin script: -"
+    else
+        copyBtn.Text = string.format("Salin script (%d/%d)", scriptIdx % n + 1, n)
+    end
+end
+
+scanBtn.MouseButton1Click:Connect(function()
+    local ok, res = pcall(scanNative)
+    if ok then
+        setStatus(res, INFO)
+    else
+        setStatus("Scan error: " .. tostring(res), ERR)
+    end
+end)
+
+copyBtn.MouseButton1Click:Connect(function()
+    local n = #scriptList
+    if n == 0 then
+        setStatus("Belum ada script dari import terakhir.", ERR)
+        return
+    end
+    scriptIdx = scriptIdx % n + 1
+    local s = scriptList[scriptIdx]
+    local clip = setclipboard or toclipboard
+    if s.source == "" then
+        setStatus(string.format("Source %s kosong / tidak terbaca (%d/%d). Coba simpan file sebagai .rbxmx.", s.path, scriptIdx, n), ERR)
+    elseif not clip then
+        setStatus("Executor tidak punya setclipboard. Ambil dari folder scripts_out.", ERR)
+    else
+        local okc = pcall(clip, s.source)
+        if okc then
+            setStatus(string.format("Disalin: %s [%s] (%d/%d). Tempel di editor script Studio Lite.", s.path, s.class, scriptIdx, n), OK)
+        else
+            setStatus("Gagal menyalin ke clipboard.", ERR)
+        end
+    end
+    updateCopyBtn()
+end)
+
 local busy = false
 
 importBtn.MouseButton1Click:Connect(function()
@@ -585,6 +1330,7 @@ importBtn.MouseButton1Click:Connect(function()
         else
             setStatus(msg, ok and OK or ERR)
         end
+        updateCopyBtn()
         busy = false
     end)
 end)
