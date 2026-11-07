@@ -1,0 +1,642 @@
+--[[
+    Studio Lite RBXM/RBXMX Importer  (Delta executor)
+    Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
+
+    Cara pakai
+      1. Taruh file .rbxm / .rbxmx di folder Delta:  <Delta>/Workspace/StudioLiteImports/
+         (folder dibuat otomatis saat script pertama kali dijalankan)
+      2. Masuk ke Studio Lite, execute script ini lewat Delta
+      3. Pilih file di GUI, pilih target, tekan Import
+
+    Cara kerja loader
+      - Jalur utama : game:GetObjects(getcustomasset(path))  -> mendukung .rbxm dan .rbxmx
+      - Fallback    : parser rbxmx bawaan (XML) kalau getcustomasset tidak tersedia.
+                      rbxm biner TIDAK bisa lewat fallback; simpan ulang sebagai .rbxmx.
+
+    Catatan
+      - Objek dibuat di sisi client. Studio Lite menyimpan lewat server, jadi hasil import
+        bisa saja hanya terlihat di layarmu dan tidak ikut tersimpan / publish.
+      - Script di dalam file dimatikan (Disabled = true) secara default.
+]]
+
+local CONFIG = {
+    Folder = "StudioLiteImports",
+    DisableScripts = true,
+    SpawnInFrontOfCamera = true,
+    StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true },
+}
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- [[PARSER BEGIN]]
+-- Parser rbxmx minimal (fallback kalau getcustomasset tidak ada)
+
+local function xmlUnescape(s)
+    s = s:gsub("&#x(%x+);", function(h) return utf8.char(tonumber(h, 16)) end)
+    s = s:gsub("&#(%d+);", function(d) return utf8.char(tonumber(d)) end)
+    s = s:gsub("&lt;", "<")
+    s = s:gsub("&gt;", ">")
+    s = s:gsub("&quot;", '"')
+    s = s:gsub("&apos;", "'")
+    s = s:gsub("&amp;", "&")
+    return s
+end
+
+local function xmlParse(xml)
+    local root = { children = {} }
+    local stack = { root }
+    local pos = 1
+    while true do
+        local lt = xml:find("<", pos, true)
+        if not lt then break end
+        if lt > pos then
+            local text = xml:sub(pos, lt - 1)
+            if text:match("%S") then
+                local top = stack[#stack]
+                top.text = (top.text or "") .. xmlUnescape(text)
+            end
+        end
+        if xml:sub(lt, lt + 8) == "<![CDATA[" then
+            local e = xml:find("]]>", lt + 9, true)
+            if not e then error("CDATA tidak ditutup") end
+            local top = stack[#stack]
+            top.text = (top.text or "") .. xml:sub(lt + 9, e - 1)
+            pos = e + 3
+        elseif xml:sub(lt, lt + 3) == "<!--" then
+            local e = xml:find("-->", lt + 4, true)
+            if not e then error("komentar tidak ditutup") end
+            pos = e + 3
+        elseif xml:sub(lt, lt + 1) == "<?" then
+            local e = xml:find("?>", lt + 2, true)
+            if not e then error("deklarasi XML tidak ditutup") end
+            pos = e + 2
+        elseif xml:sub(lt, lt + 1) == "<!" then
+            local e = xml:find(">", lt, true)
+            if not e then error("tag tidak ditutup") end
+            pos = e + 1
+        elseif xml:sub(lt, lt + 1) == "</" then
+            local e = xml:find(">", lt, true)
+            if not e then error("tag penutup rusak") end
+            if #stack > 1 then table.remove(stack) end
+            pos = e + 1
+        else
+            local e = xml:find(">", lt, true)
+            if not e then error("tag tidak ditutup") end
+            local tagText = xml:sub(lt + 1, e - 1)
+            local selfClose = tagText:sub(-1) == "/"
+            if selfClose then tagText = tagText:sub(1, -2) end
+            local name, rest = tagText:match("^([^%s]+)%s*(.*)$")
+            local node = { name = name, attrs = {}, children = {} }
+            for k, q, v in (rest or ""):gmatch("([%w_:%-]+)%s*=%s*([\"'])(.-)%2") do
+                node.attrs[k] = xmlUnescape(v)
+            end
+            local top = stack[#stack]
+            top.children[#top.children + 1] = node
+            if not selfClose then stack[#stack + 1] = node end
+            pos = e + 1
+        end
+    end
+    return root
+end
+
+local function xmlChild(node, name)
+    for _, c in ipairs(node.children) do
+        if c.name == name then return c end
+    end
+    return nil
+end
+
+local function xmlNum(node, name)
+    local c = xmlChild(node, name)
+    return (c and tonumber(c.text)) or 0
+end
+
+local PROP_ALIASES = {
+    size = "Size",
+    shape = "Shape",
+    Color3uint8 = "Color",
+}
+
+local function setEnum(inst, prop, raw)
+    local n = tonumber(raw)
+    if not n then return false end
+    local ok, cur = pcall(function() return inst[prop] end)
+    if ok and typeof(cur) == "EnumItem" then
+        for _, item in ipairs(cur.EnumType:GetEnumItems()) do
+            if item.Value == n then
+                return pcall(function() inst[prop] = item end)
+            end
+        end
+    end
+    return false
+end
+
+local function convertValue(p)
+    local t = p.name
+    if t == "string" or t == "ProtectedString" then
+        return true, p.text or ""
+    elseif t == "bool" then
+        return true, (p.text == "true")
+    elseif t == "int" or t == "int64" or t == "float" or t == "double" then
+        return true, tonumber(p.text) or 0
+    elseif t == "Vector3" then
+        return true, Vector3.new(xmlNum(p, "X"), xmlNum(p, "Y"), xmlNum(p, "Z"))
+    elseif t == "Vector2" then
+        return true, Vector2.new(xmlNum(p, "X"), xmlNum(p, "Y"))
+    elseif t == "Color3" then
+        if #p.children > 0 then
+            return true, Color3.new(xmlNum(p, "R"), xmlNum(p, "G"), xmlNum(p, "B"))
+        end
+        local n = tonumber(p.text)
+        if not n then return false end
+        return true, Color3.fromRGB(math.floor(n / 65536) % 256, math.floor(n / 256) % 256, n % 256)
+    elseif t == "Color3uint8" then
+        local n = tonumber(p.text)
+        if not n then return false end
+        return true, Color3.fromRGB(math.floor(n / 65536) % 256, math.floor(n / 256) % 256, n % 256)
+    elseif t == "CoordinateFrame" or t == "CFrame" then
+        return true, CFrame.new(
+            xmlNum(p, "X"), xmlNum(p, "Y"), xmlNum(p, "Z"),
+            xmlNum(p, "R00"), xmlNum(p, "R01"), xmlNum(p, "R02"),
+            xmlNum(p, "R10"), xmlNum(p, "R11"), xmlNum(p, "R12"),
+            xmlNum(p, "R20"), xmlNum(p, "R21"), xmlNum(p, "R22")
+        )
+    elseif t == "UDim2" then
+        return true, UDim2.new(xmlNum(p, "XS"), xmlNum(p, "XO"), xmlNum(p, "YS"), xmlNum(p, "YO"))
+    elseif t == "UDim" then
+        return true, UDim.new(xmlNum(p, "S"), xmlNum(p, "O"))
+    elseif t == "BrickColor" then
+        local n = tonumber(p.text)
+        if not n then return false end
+        return true, BrickColor.new(n)
+    elseif t == "Content" then
+        local u = xmlChild(p, "url")
+        local s = (u and u.text) or p.text
+        if not s or s == "" or s == "null" then return false end
+        return true, s
+    elseif t == "NumberSequence" then
+        local keys = {}
+        for a, b, c in (p.text or ""):gmatch("(%S+)%s+(%S+)%s+(%S+)") do
+            keys[#keys + 1] = NumberSequenceKeypoint.new(tonumber(a), tonumber(b), tonumber(c))
+        end
+        if #keys < 2 then return false end
+        return true, NumberSequence.new(keys)
+    elseif t == "ColorSequence" then
+        local keys = {}
+        for a, r, g, b in (p.text or ""):gmatch("(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+%S+") do
+            keys[#keys + 1] = ColorSequenceKeypoint.new(tonumber(a), Color3.new(tonumber(r), tonumber(g), tonumber(b)))
+        end
+        if #keys < 2 then return false end
+        return true, ColorSequence.new(keys)
+    end
+    return false
+end
+
+local function buildItem(node, refs, pending)
+    local className = node.attrs and node.attrs.class
+    if not className then return nil end
+    local ok, inst = pcall(Instance.new, className)
+    if not ok or not inst then return nil end
+    if node.attrs.referent then refs[node.attrs.referent] = inst end
+
+    local propsNode = xmlChild(node, "Properties")
+    if propsNode then
+        for _, p in ipairs(propsNode.children) do
+            local name = p.attrs and p.attrs.name
+            if name then
+                name = PROP_ALIASES[name] or name
+                if p.name == "Ref" then
+                    pending[#pending + 1] = { inst, name, p.text }
+                elseif p.name == "token" then
+                    setEnum(inst, name, p.text)
+                else
+                    local okc, val = convertValue(p)
+                    if okc then
+                        pcall(function() inst[name] = val end)
+                    end
+                end
+            end
+        end
+    end
+
+    for _, c in ipairs(node.children) do
+        if c.name == "Item" then
+            local child = buildItem(c, refs, pending)
+            if child then
+                pcall(function() child.Parent = inst end)
+            end
+        end
+    end
+    return inst
+end
+
+local function parseRbxmx(text)
+    local ok, root = pcall(xmlParse, text)
+    if not ok then return nil, "XML rusak: " .. tostring(root) end
+    local rbx
+    for _, c in ipairs(root.children) do
+        if c.name == "roblox" then rbx = c end
+    end
+    if not rbx then return nil, "bukan file rbxmx yang valid" end
+
+    local refs, pending, out = {}, {}, {}
+    for _, c in ipairs(rbx.children) do
+        if c.name == "Item" then
+            local inst = buildItem(c, refs, pending)
+            if inst then out[#out + 1] = inst end
+        end
+    end
+    for _, r in ipairs(pending) do
+        local target = refs[r[3]]
+        if target then
+            pcall(function() r[1][r[2]] = target end)
+        end
+    end
+    if #out == 0 then return nil, "tidak ada instance di dalam file" end
+    return out
+end
+-- [[PARSER END]]
+
+-- File & import logic
+
+local function displayName(path)
+    return path:match("([^/\\]+)$") or path
+end
+
+local function ensureFolder()
+    if makefolder and isfolder and not isfolder(CONFIG.Folder) then
+        pcall(makefolder, CONFIG.Folder)
+    end
+end
+
+local function listImportFiles()
+    local out = {}
+    if not listfiles then return out, "executor ini tidak punya listfiles, ketik nama file manual" end
+    ensureFolder()
+    local ok, files = pcall(listfiles, CONFIG.Folder)
+    if not ok then return out, "gagal baca folder: " .. tostring(files) end
+    for _, f in ipairs(files) do
+        local low = f:lower()
+        if low:sub(-5) == ".rbxm" or low:sub(-6) == ".rbxmx" then
+            out[#out + 1] = f
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+local function loadFile(path)
+    local getAsset = getcustomasset or getsynasset
+    local nativeErr = "getcustomasset tidak tersedia"
+    if getAsset then
+        local ok, res = pcall(function()
+            return game:GetObjects(getAsset(path))
+        end)
+        if ok and type(res) == "table" and #res > 0 then
+            return res, "GetObjects"
+        end
+        nativeErr = tostring(res)
+    end
+
+    if not readfile then return nil, "executor tidak punya readfile" end
+    local okr, data = pcall(readfile, path)
+    if not okr or type(data) ~= "string" then
+        return nil, "gagal baca file: " .. tostring(data)
+    end
+    if data:sub(1, 8) == "<roblox!" then
+        return nil, "rbxm biner butuh getcustomasset (" .. nativeErr .. "). Simpan ulang sebagai .rbxmx lalu coba lagi."
+    end
+    local objs, err = parseRbxmx(data)
+    if objs then return objs, "parser rbxmx" end
+    return nil, err
+end
+
+local function sanitize(obj)
+    if not CONFIG.DisableScripts then return end
+    local list = obj:GetDescendants()
+    table.insert(list, obj)
+    for _, d in ipairs(list) do
+        if d:IsA("BaseScript") then
+            pcall(function() d.Disabled = true end)
+        end
+    end
+end
+
+local function placeInFront(obj)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local target = cam.CFrame.Position + cam.CFrame.LookVector * 25
+    if obj:IsA("Model") then
+        pcall(function() obj:PivotTo(CFrame.new(target)) end)
+    elseif obj:IsA("BasePart") then
+        pcall(function() obj.Position = target end)
+    end
+end
+
+local TARGETS = { "Workspace", "ReplicatedStorage", "StarterGui", "StarterPack", "Lighting" }
+local targetIndex = 1
+local lastImported = {}
+
+local function doImport(path)
+    local objs, how = loadFile(path)
+    if not objs then return false, how end
+
+    local target = game:GetService(TARGETS[targetIndex])
+    local added = {}
+    for _, obj in ipairs(objs) do
+        sanitize(obj)
+        if target == workspace and CONFIG.SpawnInFrontOfCamera then
+            placeInFront(obj)
+        end
+        local ok = pcall(function() obj.Parent = target end)
+        if ok then added[#added + 1] = obj end
+    end
+    lastImported = added
+    return true, string.format("Berhasil: %d objek dari %s -> %s (via %s)",
+        #added, displayName(path), TARGETS[targetIndex], how)
+end
+
+-- GUI
+
+local env = (getgenv and getgenv()) or _G
+if env.__SLImporterGui then
+    pcall(function() env.__SLImporterGui:Destroy() end)
+end
+
+local function make(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+
+local function corner(o, r)
+    make("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o)
+end
+
+local function button(parent, text, x, y, w, h, color)
+    local b = make("TextButton", {
+        Text = text,
+        Position = UDim2.new(0, x, 0, y),
+        Size = UDim2.new(0, w, 0, h),
+        BackgroundColor3 = color or Color3.fromRGB(55, 58, 70),
+        TextColor3 = Color3.new(1, 1, 1),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        BorderSizePixel = 0,
+    }, parent)
+    corner(b)
+    return b
+end
+
+local gui = make("ScreenGui", {
+    Name = "SLImporter",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+local parented = false
+if gethui then
+    local okh, h = pcall(gethui)
+    if okh and h then parented = pcall(function() gui.Parent = h end) end
+end
+if not parented or not gui.Parent then
+    parented = pcall(function() gui.Parent = game:GetService("CoreGui") end)
+end
+if not parented or not gui.Parent then
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+env.__SLImporterGui = gui
+
+local frame = make("Frame", {
+    Size = UDim2.new(0, 300, 0, 356),
+    Position = UDim2.new(0.5, -150, 0.5, -178),
+    BackgroundColor3 = Color3.fromRGB(28, 30, 38),
+    BorderSizePixel = 0,
+}, gui)
+corner(frame, 10)
+
+local titleBar = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = Color3.fromRGB(40, 43, 56),
+    BorderSizePixel = 0,
+}, frame)
+corner(titleBar, 10)
+make("TextLabel", {
+    Text = "Studio Lite  |  RBXM Import",
+    Size = UDim2.new(1, -44, 1, 0),
+    Position = UDim2.new(0, 10, 0, 0),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.new(1, 1, 1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+local closeBtn = button(titleBar, "X", 268, 4, 26, 24, Color3.fromRGB(170, 60, 60))
+
+local INFO = Color3.fromRGB(200, 205, 220)
+local OK = Color3.fromRGB(110, 220, 140)
+local ERR = Color3.fromRGB(240, 110, 110)
+
+local status = make("TextLabel", {
+    Text = "",
+    Position = UDim2.new(0, 10, 0, 38),
+    Size = UDim2.new(0, 280, 0, 40),
+    BackgroundTransparency = 1,
+    TextColor3 = INFO,
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+}, frame)
+
+local function setStatus(text, color)
+    status.Text = text
+    status.TextColor3 = color or INFO
+end
+
+local list = make("ScrollingFrame", {
+    Position = UDim2.new(0, 10, 0, 82),
+    Size = UDim2.new(0, 280, 0, 128),
+    BackgroundColor3 = Color3.fromRGB(20, 22, 28),
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, frame)
+corner(list)
+make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+make("UIPadding", { PaddingTop = UDim.new(0, 3), PaddingLeft = UDim.new(0, 3), PaddingRight = UDim.new(0, 3) }, list)
+
+local nameBox = make("TextBox", {
+    Text = "",
+    PlaceholderText = "atau ketik nama file (di folder import)",
+    Position = UDim2.new(0, 10, 0, 216),
+    Size = UDim2.new(0, 280, 0, 26),
+    BackgroundColor3 = Color3.fromRGB(20, 22, 28),
+    TextColor3 = Color3.new(1, 1, 1),
+    PlaceholderColor3 = Color3.fromRGB(120, 125, 140),
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+    ClearTextOnFocus = false,
+    BorderSizePixel = 0,
+}, frame)
+corner(nameBox)
+
+local targetBtn = button(frame, "Target: " .. TARGETS[targetIndex], 10, 248, 136, 28)
+local scriptBtn = button(frame, "", 154, 248, 136, 28)
+local refreshBtn = button(frame, "Refresh", 10, 282, 86, 32)
+local importBtn = button(frame, "Import", 104, 282, 98, 32, Color3.fromRGB(46, 140, 90))
+local undoBtn = button(frame, "Undo", 210, 282, 80, 32, Color3.fromRGB(150, 90, 50))
+
+make("TextLabel", {
+    Text = "Folder: Delta/Workspace/" .. CONFIG.Folder,
+    Position = UDim2.new(0, 10, 0, 322),
+    Size = UDim2.new(0, 280, 0, 28),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(130, 135, 150),
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, frame)
+
+local function refreshScriptBtn()
+    scriptBtn.Text = CONFIG.DisableScripts and "Script: dimatikan" or "Script: AKTIF"
+    scriptBtn.BackgroundColor3 = CONFIG.DisableScripts and Color3.fromRGB(55, 58, 70) or Color3.fromRGB(170, 120, 40)
+end
+refreshScriptBtn()
+
+local selectedPath = nil
+local fileButtons = {}
+
+local function refreshList()
+    for _, b in ipairs(fileButtons) do b:Destroy() end
+    fileButtons = {}
+    selectedPath = nil
+    local files, err = listImportFiles()
+    for i, f in ipairs(files) do
+        local b = make("TextButton", {
+            Text = displayName(f),
+            Size = UDim2.new(1, -6, 0, 28),
+            BackgroundColor3 = Color3.fromRGB(45, 48, 60),
+            TextColor3 = Color3.new(1, 1, 1),
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            BorderSizePixel = 0,
+            LayoutOrder = i,
+        }, list)
+        corner(b, 5)
+        b.MouseButton1Click:Connect(function()
+            selectedPath = f
+            for _, other in ipairs(fileButtons) do
+                other.BackgroundColor3 = Color3.fromRGB(45, 48, 60)
+            end
+            b.BackgroundColor3 = Color3.fromRGB(60, 110, 190)
+            setStatus("Dipilih: " .. displayName(f), INFO)
+        end)
+        fileButtons[#fileButtons + 1] = b
+    end
+    if err then
+        setStatus(err, ERR)
+    elseif #files == 0 then
+        setStatus("Belum ada file .rbxm/.rbxmx. Taruh di folder lalu tekan Refresh.", INFO)
+    else
+        setStatus(#files .. " file ditemukan. Pilih satu lalu Import.", INFO)
+    end
+end
+
+local function resolvePath()
+    local typed = nameBox.Text:match("^%s*(.-)%s*$")
+    if typed ~= "" then
+        if not isfile then return CONFIG.Folder .. "/" .. typed end
+        local candidates = {
+            typed,
+            CONFIG.Folder .. "/" .. typed,
+            CONFIG.Folder .. "/" .. typed .. ".rbxmx",
+            CONFIG.Folder .. "/" .. typed .. ".rbxm",
+        }
+        for _, c in ipairs(candidates) do
+            if isfile(c) then return c end
+        end
+        return nil
+    end
+    return selectedPath
+end
+
+local busy = false
+
+importBtn.MouseButton1Click:Connect(function()
+    if busy then return end
+    local path = resolvePath()
+    if not path then
+        setStatus("File tidak ketemu. Pilih dari daftar atau cek nama file.", ERR)
+        return
+    end
+    busy = true
+    setStatus("Memuat " .. displayName(path) .. " ...", INFO)
+    task.spawn(function()
+        local okc, ok, msg = pcall(doImport, path)
+        if not okc then
+            setStatus("Error: " .. tostring(ok), ERR)
+        else
+            setStatus(msg, ok and OK or ERR)
+        end
+        busy = false
+    end)
+end)
+
+undoBtn.MouseButton1Click:Connect(function()
+    local n = 0
+    for _, obj in ipairs(lastImported) do
+        if obj and obj.Parent then
+            pcall(function() obj:Destroy() end)
+            n = n + 1
+        end
+    end
+    lastImported = {}
+    setStatus(n .. " objek import terakhir dihapus.", INFO)
+end)
+
+targetBtn.MouseButton1Click:Connect(function()
+    targetIndex = targetIndex % #TARGETS + 1
+    targetBtn.Text = "Target: " .. TARGETS[targetIndex]
+end)
+
+scriptBtn.MouseButton1Click:Connect(function()
+    CONFIG.DisableScripts = not CONFIG.DisableScripts
+    refreshScriptBtn()
+end)
+
+refreshBtn.MouseButton1Click:Connect(refreshList)
+closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
+
+-- drag lewat title bar (mouse & touch)
+do
+    local dragging, dragStart, startPos = false, nil, nil
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+ensureFolder()
+refreshList()
+if not CONFIG.StudioLitePlaceIds[game.PlaceId] then
+    setStatus("PlaceId " .. tostring(game.PlaceId) .. " bukan Studio Lite resmi, tetap bisa dipakai. " .. status.Text, INFO)
+end
