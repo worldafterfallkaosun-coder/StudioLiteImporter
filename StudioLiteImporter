@@ -1,53 +1,36 @@
 --[[
-    Studio Lite RBXM/RBXMX Importer v4 Explorer  (Delta executor)
+    Studio Lite Importer v5 Studio  (Delta executor)
     Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
 
     Cara pakai
-      1. Taruh file .rbxm / .rbxmx di mana saja di folder workspace Delta
-         (disarankan: <Delta>/Workspace/StudioLiteImports/, dibuat otomatis).
+      1. Taruh file di folder workspace Delta (disarankan <Delta>/Workspace/StudioLiteImports/):
+         .rbxm .rbxmx (model)  .rbxl .rbxlx (place)  .png .jpg .jpeg .bmp .tga (gambar)  .mp3 .ogg (audio)
       2. Masuk ke Studio Lite, execute script ini lewat Delta.
-      3. Cari / centang satu atau banyak file, pilih target (tombol To: -> tab Explorer),
-         lalu tekan Import.
+      3. Tab Files: centang file -> pilih target (tab Explorer) -> Import.
+      4. Tab Toolbox: cari aset Roblox atau insert langsung dengan ID.
+      5. Tab Studio + toolbar: seleksi, Group/Ungroup, Anchor, CanCollide, alat Geser/Putar/Skala.
 
-    Baru di v4 Explorer
-      - Tab "Explorer": memindai isi Explorer Studio Lite (Workspace, ReplicatedStorage,
-        StarterGui, StarterPack, Lighting, dst.) secara LIVE dan menampilkannya sebagai
-        pohon di UI. Objek baru / dihapus muncul otomatis (sekitar 0.5 detik).
-      - Tombol "To:" di tab Files membuka tab Explorer. Tap objek mana pun (folder,
-        model, GUI, dst.) untuk dijadikan target Import, bukan cuma 5 service tetap.
-      - Cari objek / class di seluruh Explorer, buka-tutup cabang, Favorit (PIN) dan
-        daftar "Terakhir dipakai" (tersimpan antar sesi).
-      - Pengaturan > "Semua service" menampilkan service lain di pohon Explorer.
-      - Diagnosa: "Scan GUI Explorer Studio Lite" mencatat struktur GUI Explorer bawaan
-        game ke Log / file / clipboard.
-
-    Baru di v3 Pro
-      - Scanner rekursif: semua file .rbxm / .rbxmx di seluruh workspace executor
-        (subfolder ikut) atau hanya folder import. Auto-rescan di latar belakang.
-      - Daftar file virtual (ringan walau ratusan file) + kolom pencarian multi-kata,
-        filter format, urutan, centang banyak, "Pilih semua" (sesuai hasil filter).
-      - Batch import berurutan dengan progress bar, tombol Batal, dan Undo per batch.
-        Model hasil batch otomatis diberi jarak supaya tidak menumpuk.
-      - Panel detail: format, ukuran, jumlah objek & script, root class.
-      - Jendela bisa dikecilkan (minimize), dibesarkan (maximize), di-resize lewat
-        pegangan pojok kanan-bawah, dan di-drag. Tombol X hanya MENYEMBUNYIKAN UI:
-        scanner, antrean import, dan auto-rescan tetap jalan, tombol kecil "SL"
-        muncul untuk membuka lagi (atau tekan RightControl di PC).
-      - Tab Log (riwayat proses) dan tab Pengaturan (tersimpan otomatis).
-      - Opsi "Auto-import file baru" untuk folder import (default mati).
-
-    Cara kerja loader (tidak berubah dari v2)
-      - Jalur utama : game:GetObjects(getcustomasset(path))  -> mendukung .rbxm dan .rbxmx
-      - Fallback    : parser rbxmx bawaan (XML) kalau getcustomasset tidak tersedia.
-                      rbxm biner TIDAK bisa lewat fallback; simpan ulang sebagai .rbxmx.
-      - Teks script dibaca langsung dari isi file (XML & biner) lalu dipasang ke struktur
-        editor bawaan Studio Lite (SL_CodeTextBox + SaveChangesTo).
+    Baru di v5 Studio
+      - Import AMAN: model dipasang dengan placement rigid (posisi relatif antar root tidak berubah),
+        part tak ter-anchor di-anchor sementara supaya tidak runtuh karena fisika (nilai asli disimpan,
+        tombol "Lepas anchor asli"), cek integritas (isi file vs objek yang terbentuk), teks script
+        dipasang ke editor Studio Lite, semua operasi lewat pcall dan bisa di-undo.
+      - Place (.rbxl / .rbxlx): tiap service dibungkus Folder (default) atau di-merge ke service asli.
+      - Gambar -> Decal pada part terpilih / papan baru / ImageLabel. Audio -> Sound. Pratinjau di panel detail.
+      - Toolbox: cari Model / Gambar / Audio, grid thumbnail, favorit, terakhir dipakai, insert dengan ID / link.
+      - Studio: seleksi terhubung ke Studio Lite lewat hook bawaan game (ExplorerPanel.GetSelection /
+        SetSelection, event ExplorerSelectionChanged), Group, Ungroup, Duplikat, Hapus, Anchor, CanCollide,
+        CanTouch, CanQuery, transform numerik, riwayat Undo / Redo.
+      - Alat Geser / Putar / Skala dengan gizmo Handles (global / lokal, snap), mirip Roblox Studio.
+      - Plugin: kode Lua di folder StudioLiteImports/plugins dengan API SL (seleksi, operasi, alat,
+        import, Toolbox, penyimpanan, UI sendiri). Dimatikan sampai kamu aktifkan.
 
     Catatan
       - Objek dibuat di sisi client; Save Studio Lite membaca workspace lokal.
-      - Script di dalam file dimatikan (Disabled = true) secara default.
-      - Kalau tidak ada script bawaan Studio Lite yang terbaca, insert satu script lewat
-        menu Studio Lite dulu lalu import ulang.
+      - Aset lokal (gambar / audio dari file) hanya terlihat di client-mu. Upload ke Roblox lalu pakai ID
+        (tab Toolbox) kalau mau dibagikan.
+      - Toolbox butuh executor dengan request / http_request. Insert dengan ID memakai GetObjects.
+      - Pintasan PC: Alt+1..4 = Pilih / Geser / Skala / Putar, RightControl = tampil / sembunyi UI.
 ]]
 
 local CONFIG = {
@@ -55,7 +38,7 @@ local CONFIG = {
     SettingsFile = "StudioLiteImports/ui_settings.json",
 
     -- opsi yang bisa diubah dari tab Pengaturan (tersimpan otomatis)
-    DisableScripts = true,
+    DisableScripts = false,     -- false = Disabled dari file dipertahankan (script jalan saat Play)
     SpawnInFrontOfCamera = true,
     InstallScriptText = true,    -- pasang teks script ke editor Studio Lite
     AutoScan = true,             -- rescan berkala di latar belakang
@@ -63,6 +46,17 @@ local CONFIG = {
     AutoImportNew = false,       -- import otomatis file BARU yang muncul di Folder
     AutoHideAfterImport = false, -- sembunyikan UI setelah batch selesai
     ExplorerAllServices = false, -- tampilkan semua service di pohon Explorer (bukan hanya yang umum)
+    FreezeOnImport = true,       -- anchor sementara part tak ter-anchor supaya model tidak berantakan
+    IntegrityCheck = true,       -- bandingkan isi file dengan objek yang terbentuk
+    PlaceMode = "folder",        -- "folder" | "merge"
+    ImageMode = "decal",         -- "decal" | "gui"
+    DecalFace = "Front",
+    OpDescendants = true,        -- operasi Anchor/CanCollide dst. sampai turunan
+    UniformScale = false,
+    RotateInvert = false,
+    ShowToolbar = true,
+    MoveSnap = 1, RotSnap = 15, ScaleSnap = 1, ToolSpace = "global",
+    ToolboxPageSize = 30,
 
     -- tuning scanner
     AutoScanInterval = 6,        -- detik
@@ -605,12 +599,62 @@ local function splitPath(path)
     return dir, name
 end
 
+-- ===== Jenis file yang dikenali scanner =====
+local KIND_OF = {
+    rbxm = "model", rbxmx = "model", rbxl = "place", rbxlx = "place",
+    png = "image", jpg = "image", jpeg = "image", bmp = "image", tga = "image",
+    mp3 = "audio", ogg = "audio",
+}
+local KIND_LIST = { "all", "model", "place", "image", "audio" }
+local KIND_LABEL = { all = "Semua", model = "Model", place = "Place", image = "Gambar", audio = "Audio" }
+
 local function extOf(name)
-    local low = name:lower()
-    if low:sub(-6) == ".rbxmx" then return "rbxmx" end
-    if low:sub(-5) == ".rbxm" then return "rbxm" end
+    local ext = name:lower():match("%.(%w+)$")
+    if ext and KIND_OF[ext] then return ext end
     return nil
 end
+
+-- ukuran gambar dari header file (PNG / JPEG / BMP / TGA), tanpa decode piksel
+local function imageSize(d)
+    local function be32(p) local a, b, c, e = d:byte(p, p + 3); return a and (a * 16777216 + b * 65536 + c * 256 + e) end
+    local function be16(p) local a, b = d:byte(p, p + 1); return a and (a * 256 + b) end
+    local function le32(p) local a, b, c, e = d:byte(p, p + 3); return a and (a + b * 256 + c * 65536 + e * 16777216) end
+    local function le16(p) local a, b = d:byte(p, p + 1); return a and (a + b * 256) end
+    if d:sub(1, 8) == "\137PNG\r\n\26\n" then
+        return be32(17), be32(21)
+    elseif d:sub(1, 2) == "\255\216" then
+        local p = 3
+        local n = #d
+        while p + 9 <= n do
+            if d:byte(p) ~= 0xFF then p = p + 1
+            else
+                local m = d:byte(p + 1)
+                if m == 0xFF then
+                    p = p + 1
+                elseif m == 0xD8 or m == 0x01 or (m >= 0xD0 and m <= 0xD7) then
+                    p = p + 2
+                elseif m >= 0xC0 and m <= 0xCF and m ~= 0xC4 and m ~= 0xC8 and m ~= 0xCC then
+                    return be16(p + 7), be16(p + 5)
+                else
+                    local len = be16(p + 2)
+                    if not len or len < 2 then return nil end
+                    p = p + 2 + len
+                end
+            end
+        end
+    elseif d:sub(1, 2) == "BM" then
+        local w, h = le32(19), le32(23)
+        if w and h then
+            if h >= 2147483648 then h = 4294967296 - h end
+            return w, h
+        end
+    elseif #d > 18 then
+        local w, h = le16(13), le16(15)
+        if w and h and w > 0 and h > 0 and w < 16384 and h < 16384 then return w, h end
+    end
+    return nil
+end
+
 
 local function isDir(p)
     if not isfolder then return false end
@@ -625,7 +669,7 @@ local function makeEntry(raw)
     if not ext then return nil end
     local base = name:gsub("%.[^.]+$", "")
     return {
-        raw = raw, path = path, name = name, base = base, dir = dir, ext = ext,
+        raw = raw, path = path, name = name, base = base, dir = dir, ext = ext, kind = KIND_OF[ext],
         lname = name:lower(), ldir = dir:lower(), lower = (name .. " " .. dir):lower(),
     }
 end
@@ -702,9 +746,19 @@ local function inspectFile(entry)
     if not readfile then return nil, "readfile tidak tersedia" end
     local ok, data = pcall(readfile, entry.raw)
     if not ok or type(data) ~= "string" then return nil, "file tidak bisa dibaca" end
-    local info = { size = #data }
+    local info = { size = #data, kind = entry.kind }
+    if entry.kind == "image" then
+        info.format = entry.ext:upper() .. " (gambar)"
+        info.w, info.h = imageSize(data)
+        return info
+    elseif entry.kind == "audio" then
+        info.format = entry.ext:upper() .. " (audio)"
+        return info
+    end
     info.binary = data:sub(1, 8) == "<roblox!"
-    info.format = info.binary and "RBXM biner" or "RBXMX (XML)"
+    local pl = entry.kind == "place"
+    info.format = pl and (info.binary and "RBXL biner (place)" or "RBXLX (place XML)")
+        or (info.binary and "RBXM biner" or "RBXMX (XML)")
     if #data > CONFIG.InspectMaxBytes then
         info.skipped = true
         return info
@@ -750,18 +804,19 @@ local function loadFile(path)
 end
 
 -- Kumpulkan teks script. Sumber utama: isi file (XML maupun biner) lewat parseTree,
--- dicocokkan ke instance hasil import. Cadangan kalau file gagal diparse:
+-- dicocokkan ke instance hasil import. Kalau roots sudah diparse, kirim lewat parameter
+-- ketiga supaya file tidak diparse dua kali. Cadangan kalau tidak ada roots:
 -- best effort lewat instance (Source / gethiddenproperty / decompile).
-local function gatherScripts(data, objs)
+local function gatherScripts(data, objs, roots)
     local parseErr
-    if data then
-        local ok, roots = pcall(parseTree, data)
-        if ok and type(roots) == "table" then
-            local out = {}
-            matchScripts(objs, roots, "", out)
-            return out, nil
-        end
-        parseErr = tostring(roots)
+    if not roots and data then
+        local ok, r = pcall(parseTree, data)
+        if ok and type(r) == "table" then roots = r else parseErr = tostring(r) end
+    end
+    if roots then
+        local out = {}
+        matchScripts(objs, roots, "", out)
+        return out, nil
     end
 
     local scripts = {}
@@ -827,29 +882,39 @@ local function sanitize(obj)
 end
 
 
--- Taruh di depan kamera. state.offset dipakai batch import supaya tiap file
--- digeser ke samping (RightVector) sesuai ukurannya dan tidak menumpuk.
-local function placeInFront(obj, state)
+-- Taruh grup objek di depan kamera SECARA RIGID: seluruh root dipindah bersama sebagai satu
+-- kesatuan (lewat Model sementara) sehingga posisi relatif antar root tidak berubah dan
+-- struktur multi-root tidak "pecah". state.offset dipakai batch supaya tiap file diberi jarak.
+local function placeGroup(objs, state)
     local cam = workspace.CurrentCamera
     if not cam then return end
     state = state or { offset = 0 }
-    local size = 8
-    if obj:IsA("Model") then
-        local ok, s = pcall(function() return obj:GetExtentsSize() end)
-        if ok and s then size = math.max(s.X, s.Z, 2) end
-    elseif obj:IsA("BasePart") then
-        size = math.max(obj.Size.X, obj.Size.Z, 2)
-    else
-        return
+    local movers = {}
+    for _, o in ipairs(objs) do
+        if o:IsA("Model") or o:IsA("BasePart") then movers[#movers + 1] = o end
     end
-    local cf = cam.CFrame
-    local target = cf.Position + cf.LookVector * 25 + cf.RightVector * (state.offset + size / 2)
-    state.offset = state.offset + size + 4
-    if obj:IsA("Model") then
-        pcall(function() obj:PivotTo(CFrame.new(target)) end)
-    else
-        pcall(function() obj.Position = target end)
+    if #movers == 0 then return end
+
+    local temp = Instance.new("Model")
+    local okAll = true
+    for _, o in ipairs(movers) do
+        if not pcall(function() o.Parent = temp end) then okAll = false end
     end
+    if okAll then
+        local okb, cf, size = pcall(function() return temp:GetBoundingBox() end)
+        if okb and cf and size then
+            local width = math.max(size.X, size.Z, 2)
+            local c = cam.CFrame
+            local aim = c.Position + c.LookVector * 25 + c.RightVector * (state.offset + width / 2)
+            state.offset = state.offset + width + 4
+            pcall(function()
+                local pv = temp:GetPivot()
+                temp:PivotTo(pv - pv.Position + aim)
+            end)
+        end
+    end
+    for _, o in ipairs(movers) do pcall(function() o.Parent = nil end) end
+    pcall(function() temp:Destroy() end)
 end
 
 -- ===== Pemasang teks script untuk Studio Lite =====
@@ -1181,10 +1246,11 @@ local S = {
     history = {}, log = {}, scriptList = {}, scriptIdx = 0,
     busy = false, cancel = false, scanning = false, firstScan = false,
     target = "Workspace", filter = "all", sort = "name", query = "",
-    focus = nil, infoCache = {}, sig = "", counts = { all = 0, rbxm = 0, rbxmx = 0 },
+    focus = nil, infoCache = {}, sig = "", counts = { all = 0, model = 0, place = 0, image = 0, audio = 0 },
     ui = {},
 }
 local E = {}
+local SEL, HIST, OPS, TOOL, TB, PLG = {}, {}, {}, {}, {}, {}
 
 -- state Explorer live (pohon instance yang dipakai sebagai target import)
 local X = {
@@ -1234,7 +1300,9 @@ end
 
 -- ---- Pengaturan tersimpan ----
 local PERSIST = { "DisableScripts", "SpawnInFrontOfCamera", "InstallScriptText", "AutoScan",
-    "ScanScope", "AutoImportNew", "AutoHideAfterImport", "ExplorerAllServices" }
+    "ScanScope", "AutoImportNew", "AutoHideAfterImport", "ExplorerAllServices",
+    "FreezeOnImport", "IntegrityCheck", "PlaceMode", "ImageMode", "DecalFace", "OpDescendants",
+    "UniformScale", "RotateInvert", "ShowToolbar", "MoveSnap", "RotSnap", "ScaleSnap", "ToolSpace" }
 
 function E.loadSettings()
     if not (isfile and readfile) then return end
@@ -1248,6 +1316,14 @@ function E.loadSettings()
         if t[k] ~= nil then CONFIG[k] = t[k] end
     end
     if CONFIG.ScanScope ~= "all" and CONFIG.ScanScope ~= "folder" then CONFIG.ScanScope = "all" end
+    if CONFIG.PlaceMode ~= "folder" and CONFIG.PlaceMode ~= "merge" then CONFIG.PlaceMode = "folder" end
+    if CONFIG.ImageMode ~= "decal" and CONFIG.ImageMode ~= "gui" then CONFIG.ImageMode = "decal" end
+    local okFace = { Front = true, Back = true, Left = true, Right = true, Top = true, Bottom = true, All = true }
+    if not okFace[CONFIG.DecalFace] then CONFIG.DecalFace = "Front" end
+    if CONFIG.ToolSpace ~= "global" and CONFIG.ToolSpace ~= "local" then CONFIG.ToolSpace = "global" end
+    for _, k in ipairs({ "MoveSnap", "RotSnap", "ScaleSnap" }) do
+        if type(CONFIG[k]) ~= "number" or CONFIG[k] < 0 then CONFIG[k] = 1 end
+    end
     -- target disimpan sebagai path ("Workspace/Map/Props"), dicocokkan ulang saat dipakai
     if type(t.target) == "string" and t.target ~= "" then S.target = t.target end
     local function strList(v, max)
@@ -1261,8 +1337,10 @@ function E.loadSettings()
     end
     X.pins, X.recent = strList(t.pins, 12), strList(t.recent, 6)
     if table.find(SORTS, t.sort) then S.sort = t.sort end
-    if t.filter == "all" or t.filter == "rbxm" or t.filter == "rbxmx" then S.filter = t.filter end
+    if table.find(KIND_LIST, t.filter) then S.filter = t.filter end
     if type(t.ui) == "table" then S.ui = t.ui end
+    TB.restore(t.toolbox)
+    PLG.enabledLoad(t.plugins)
 end
 
 local saveQueued = false
@@ -1272,7 +1350,7 @@ function E.saveSettings()
     task.delay(1, function()
         saveQueued = false
         local data = { target = S.target, sort = S.sort, filter = S.filter, ui = S.ui,
-            pins = X.pins, recent = X.recent }
+            pins = X.pins, recent = X.recent, toolbox = TB.persist(), plugins = PLG.enabled }
         for _, k in ipairs(PERSIST) do data[k] = CONFIG[k] end
         local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
         if ok then
@@ -1304,7 +1382,7 @@ function E.applyView()
     local terms = {}
     for w in S.query:lower():gmatch("%S+") do terms[#terms + 1] = w end
     local v = {}
-    local counts = { all = 0, rbxm = 0, rbxmx = 0 }
+    local counts = { all = 0, model = 0, place = 0, image = 0, audio = 0 }
     for _, e in ipairs(S.entries) do
         local okm = true
         for _, t in ipairs(terms) do
@@ -1312,8 +1390,8 @@ function E.applyView()
         end
         if okm then
             counts.all = counts.all + 1
-            counts[e.ext] = counts[e.ext] + 1
-            if S.filter == "all" or S.filter == e.ext then v[#v + 1] = e end
+            counts[e.kind] = counts[e.kind] + 1
+            if S.filter == "all" or S.filter == e.kind then v[#v + 1] = e end
         end
     end
     sortList(v, S.sort)
@@ -1408,7 +1486,7 @@ local function rescan(silent)
         if #fresh > 0 and silent then
             msg = string.format("%d file baru terdeteksi (total %d)", #fresh, #entries)
         else
-            msg = string.format("Scan selesai: %d file .rbxm/.rbxmx", #entries)
+            msg = string.format("Scan selesai: %d file (model, place, gambar, audio)", #entries)
             if info.truncated then msg = msg .. " (dibatasi " .. CONFIG.MaxEntries .. " entri)" end
         end
         if not silent or #fresh > 0 then notify(msg, "ok") else setStatus(msg, "info") end
@@ -1427,18 +1505,136 @@ end
 
 function E.rescan(silent) task.spawn(rescan, silent) end
 
--- ---- Import satu file ----
--- return: ok, pesan, objek yang ditambahkan, daftar script
-local function doImport(path, opts, placeState)
-    local target = opts.target
-    if typeof(target) ~= "Instance" or not target:IsDescendantOf(game) then
-        return false, "target import tidak ditemukan (dihapus?), pilih ulang di tab Explorer"
-    end
-    local objs, how, data = loadFile(path)
-    if not objs then return false, how end
+-- ===================================================================
+-- IMPORT: model / place / gambar / audio
+-- ===================================================================
 
-    local scripts, parseErr = gatherScripts(data, objs)
-    local outDir = exportScripts(path, scripts)
+local SERVICE_CLASS = {
+    Workspace = true, Lighting = true, ReplicatedStorage = true, ReplicatedFirst = true, StarterGui = true,
+    StarterPack = true, StarterPlayer = true, ServerStorage = true, ServerScriptService = true,
+    SoundService = true, Teams = true, Chat = true, Players = true, TextChatService = true,
+    MaterialService = true, LocalizationService = true, TestService = true, Debris = true,
+}
+local PLACE_SKIP = { Camera = true, Terrain = true }
+local MERGE_SERVICE = { Workspace = true, ReplicatedStorage = true, StarterGui = true, StarterPack = true, Lighting = true }
+local LOCAL_NOTE = "aset lokal hanya terlihat di client-mu; upload ke Roblox lalu pakai ID supaya permanen"
+
+local ReplicatedStorageSvc = game:GetService("ReplicatedStorage")
+local CoreGuiSvc
+pcall(function() CoreGuiSvc = game:GetService("CoreGui") end)
+
+local function isWorld(inst)
+    return inst == workspace or inst:IsDescendantOf(workspace)
+end
+
+-- objek yang tidak boleh disentuh operasi: service, Terrain, Camera, internal Studio Lite,
+-- PlayerGui / CoreGui, gizmo, dan GUI importer ini sendiri
+local function isProtected(inst)
+    if typeof(inst) ~= "Instance" then return true end
+    if inst == game or inst.Parent == game then return true end
+    if inst:IsA("Terrain") or inst:IsA("Camera") then return true end
+    local sl = ReplicatedStorageSvc:FindFirstChild("StudioLiteFolder")
+    if sl and (inst == sl or inst:IsDescendantOf(sl)) then return true end
+    if inst:IsDescendantOf(Players) then return true end
+    local okc, inCore = pcall(function() return CoreGuiSvc ~= nil and inst:IsDescendantOf(CoreGuiSvc) end)
+    if okc and inCore then return true end
+    local okg, isGizmo = pcall(function() return inst:GetAttribute("SL_Gizmo") end)
+    if okg and isGizmo then return true end
+    local g = env.__SLImporterGui
+    if g and (inst == g or inst:IsDescendantOf(g)) then return true end
+    return false
+end
+
+-- buang objek yang merupakan turunan dari objek lain di daftar yang sama
+local function topLevel(list)
+    local set = {}
+    for _, i in ipairs(list) do set[i] = true end
+    local out = {}
+    for _, i in ipairs(list) do
+        local skip = false
+        local p = i.Parent
+        while p do
+            if set[p] then skip = true break end
+            p = p.Parent
+        end
+        if not skip then out[#out + 1] = i end
+    end
+    return out
+end
+
+-- ---- Cek integritas: bandingkan isi file (pohon) dengan instance yang benar-benar terbentuk ----
+local function tallyNodes(nodes, t)
+    for _, n in ipairs(nodes) do
+        t[n.class] = (t[n.class] or 0) + 1
+        tallyNodes(n.children, t)
+    end
+    return t
+end
+
+local function tallyInst(objs, t)
+    for _, o in ipairs(objs) do
+        t[o.ClassName] = (t[o.ClassName] or 0) + 1
+        for _, d in ipairs(o:GetDescendants()) do t[d.ClassName] = (t[d.ClassName] or 0) + 1 end
+    end
+    return t
+end
+
+local function integrityReport(nodes, objs)
+    local want, got = tallyNodes(nodes, {}), tallyInst(objs, {})
+    local missing, total, lost = {}, 0, 0
+    for cls, n in pairs(want) do
+        total = total + n
+        local g = got[cls] or 0
+        if g < n then
+            missing[#missing + 1] = { cls = cls, n = n - g }
+            lost = lost + (n - g)
+        end
+    end
+    table.sort(missing, function(a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.cls < b.cls
+    end)
+    return { expected = total, lost = lost, missing = missing }
+end
+
+local function integrityText(rep)
+    if rep.lost == 0 then return string.format("integritas OK (%d objek)", rep.expected) end
+    local parts = {}
+    for i, m in ipairs(rep.missing) do
+        if i > 4 then parts[#parts + 1] = "..." break end
+        parts[#parts + 1] = m.cls .. "x" .. m.n
+    end
+    return string.format("INTEGRITAS: %d dari %d objek tidak terbentuk (%s)", rep.lost, rep.expected, table.concat(parts, ", "))
+end
+
+-- ---- Freeze: anchor part yang tidak di-anchor supaya model tidak berantakan karena fisika ----
+-- Nilai asli disimpan di atribut SL_OrigAnchored supaya bisa dikembalikan (tombol "Lepas anchor asli").
+local function freezeParts(objs)
+    local n = 0
+    local function one(d)
+        if d:IsA("BasePart") and not d:IsA("Terrain") then
+            local okA, anch = pcall(function() return d.Anchored end)
+            if okA and anch == false then
+                pcall(function() d:SetAttribute("SL_OrigAnchored", false) end)
+                if pcall(function() d.Anchored = true end) then n = n + 1 end
+            end
+        end
+    end
+    for _, o in ipairs(objs) do
+        one(o)
+        for _, d in ipairs(o:GetDescendants()) do one(d) end
+    end
+    return n
+end
+
+-- ---- Tail import bersama (model, isi place, aset Toolbox) ----
+-- objs: root instance (Parent nil). roots: pohon file (untuk teks script & integritas), boleh nil.
+-- return: ok, pesan, added, scripts, stats
+local function finishImport(objs, roots, label, how, dest, opts)
+    opts = opts or {}
+    local scripts, parseErr = gatherScripts(nil, objs, roots)
+    parseErr = parseErr or opts.parseErr
+    local outDir = exportScripts(label, scripts)
 
     -- pasang teks script SEBELUM objek masuk ke game (struktur editor Studio Lite)
     local stats = { ok = 0, fail = 0, notes = {} }
@@ -1452,17 +1648,23 @@ local function doImport(path, opts, placeState)
         end
     end
 
-    local added = {}
-    for _, obj in ipairs(objs) do
-        sanitize(obj)
-        if CONFIG.SpawnInFrontOfCamera and (target == workspace or target:IsDescendantOf(workspace)) then
-            placeInFront(obj, placeState)
-        end
-        local ok = pcall(function() obj.Parent = target end)
-        if ok then added[#added + 1] = obj end
+    for _, obj in ipairs(objs) do sanitize(obj) end
+
+    local world = isWorld(dest)
+    local froze = 0
+    if CONFIG.FreezeOnImport and world then froze = freezeParts(objs) end
+    if world and CONFIG.SpawnInFrontOfCamera and not opts.noPlace then
+        local okp, perr = pcall(placeGroup, objs, opts.placeState)
+        if not okp then logLine("placeGroup: " .. tostring(perr), "warn") end
     end
 
-    local msg = string.format("%s -> %s: %d objek (via %s)", displayName(path), X.pathOf(target), #added, how)
+    local added = {}
+    for _, obj in ipairs(objs) do
+        local ok = pcall(function() obj.Parent = dest end)
+        if ok and obj.Parent == dest then added[#added + 1] = obj end
+    end
+
+    local msg = string.format("%s -> %s: %d objek (via %s)", label, X.pathOf(dest), #added, how)
     if #scripts > 0 then
         if CONFIG.InstallScriptText then
             msg = msg .. string.format(", teks script %d/%d", stats.ok, #scripts)
@@ -1471,9 +1673,310 @@ local function doImport(path, opts, placeState)
             msg = msg .. string.format(", %d script (teks tidak dipasang)", #scripts)
         end
     end
-    if parseErr then msg = msg .. " | peringatan baca file: " .. parseErr:sub(1, 80) end
+    if froze > 0 then msg = msg .. string.format(", %d part di-anchor", froze) end
+    if CONFIG.IntegrityCheck and roots then
+        local okr, rep = pcall(integrityReport, roots, objs)
+        if okr then msg = msg .. ", " .. integrityText(rep) end
+    end
+    if parseErr then msg = msg .. " | peringatan baca file: " .. tostring(parseErr):sub(1, 80) end
     if outDir and stats.fail > 0 then msg = msg .. " | cadangan .lua: " .. outDir end
     return #added > 0, (#added > 0) and msg or (msg .. " | tidak ada objek yang bisa dipasang"), added, scripts, stats
+end
+
+local function parseOrNil(data)
+    if not data then return nil end
+    local ok, r = pcall(parseTree, data)
+    if ok and type(r) == "table" and r[1] then return r end
+    return nil, tostring(r)
+end
+
+local EMPTY_STATS = function() return { ok = 0, fail = 0, notes = {} } end
+
+local function importModelFile(entry, target, placeState)
+    local objs, how, data = loadFile(entry.raw)
+    if not objs then return false, how end
+    local roots, perr = parseOrNil(data)
+    return finishImport(objs, roots, entry.name, how, target, { placeState = placeState, parseErr = perr })
+end
+
+-- ---- Place (.rbxl / .rbxlx) ----
+local function nodeChildrenOfClass(roots, class, used)
+    for i, n in ipairs(roots) do
+        if not used[i] and n.class == class then
+            used[i] = true
+            return n.children
+        end
+    end
+    return nil
+end
+
+local function importPlaceFile(entry, target, placeState)
+    local objs, how, data = loadFile(entry.raw)
+    if not objs then return false, how end
+    local roots, perr = parseOrNil(data)
+
+    -- kelompok: { svc = nama service, objs = {instance}, nodes = {node} | nil }
+    local groups = {}
+    local function addGroup(svc, list, nodes)
+        local fo, fn = {}, nil
+        for _, o in ipairs(list) do
+            if not PLACE_SKIP[o.ClassName] then fo[#fo + 1] = o end
+        end
+        if nodes then
+            fn = {}
+            for _, n in ipairs(nodes) do
+                if not PLACE_SKIP[n.class] then fn[#fn + 1] = n end
+            end
+        end
+        if #fo > 0 then groups[#groups + 1] = { svc = svc, objs = fo, nodes = fn } end
+    end
+
+    local hasServiceObjs = false
+    for _, o in ipairs(objs) do
+        if SERVICE_CLASS[o.ClassName] then hasServiceObjs = true break end
+    end
+
+    if hasServiceObjs then
+        local used = {}
+        for _, o in ipairs(objs) do
+            if SERVICE_CLASS[o.ClassName] then
+                addGroup(o.ClassName, o:GetChildren(), roots and nodeChildrenOfClass(roots, o.ClassName, used) or nil)
+            else
+                addGroup("(lainnya)", { o }, nil)
+            end
+        end
+    else
+        local allServices = roots ~= nil and #roots > 0
+        local total = 0
+        if allServices then
+            for _, n in ipairs(roots) do
+                if not SERVICE_CLASS[n.class] then allServices = false break end
+                total = total + #n.children
+            end
+        end
+        if allServices and total == #objs then
+            local idx = 1
+            for _, n in ipairs(roots) do
+                local slice = {}
+                for i = 1, #n.children do
+                    slice[#slice + 1] = objs[idx]
+                    idx = idx + 1
+                end
+                addGroup(n.class, slice, n.children)
+            end
+        else
+            addGroup("(isi place)", objs, nil)
+        end
+    end
+    if #groups == 0 then return false, "place tidak berisi objek yang bisa diimpor (hanya Camera/Terrain?)" end
+
+    local added, allScripts, lines = {}, {}, {}
+    local totalObjs, okGroups = 0, 0
+    local wrapper
+    if CONFIG.PlaceMode ~= "merge" then
+        wrapper = Instance.new("Folder")
+        wrapper.Name = entry.base
+        wrapper.Parent = target
+        added[#added + 1] = wrapper
+    end
+
+    local anyStats = { ok = 0, fail = 0, notes = {}, firstReason = nil }
+    for _, g in ipairs(groups) do
+        local dest
+        if wrapper then
+            dest = Instance.new("Folder")
+            dest.Name = g.svc
+            dest.Parent = wrapper
+        elseif MERGE_SERVICE[g.svc] then
+            dest = game:GetService(g.svc)
+        else
+            dest = Instance.new("Folder")
+            dest.Name = g.svc .. " (place)"
+            dest.Parent = target
+            added[#added + 1] = dest
+        end
+        local okc, ok, msg, gAdded, gScripts, gStats = pcall(finishImport, g.objs, g.nodes, entry.name .. " [" .. g.svc .. "]",
+            how, dest, { placeState = placeState, noPlace = true, parseErr = (g == groups[1]) and perr or nil })
+        if okc and ok then
+            okGroups = okGroups + 1
+            totalObjs = totalObjs + #gAdded
+            if not wrapper then
+                for _, o in ipairs(gAdded) do added[#added + 1] = o end
+            end
+            for _, s in ipairs(gScripts) do allScripts[#allScripts + 1] = s end
+            anyStats.ok = anyStats.ok + gStats.ok
+            anyStats.fail = anyStats.fail + gStats.fail
+            anyStats.firstReason = anyStats.firstReason or gStats.firstReason
+            lines[#lines + 1] = msg
+            logLine(msg, "info")
+        else
+            lines[#lines + 1] = g.svc .. ": " .. tostring(okc and msg or ok)
+            logLine(entry.name .. " [" .. g.svc .. "]: " .. tostring(okc and msg or ok), "warn")
+        end
+    end
+
+    local summary = string.format("%s -> %s: %d grup, %d objek (via %s, mode %s), teks script %d/%d",
+        entry.name, X.pathOf(target), okGroups, totalObjs, how, wrapper and "folder" or "merge",
+        anyStats.ok, #allScripts)
+    if anyStats.fail > 0 then summary = summary .. " (gagal: " .. tostring(anyStats.firstReason) .. ")" end
+    summary = summary .. " | posisi asli dipertahankan; Terrain/Camera dilewati"
+    return totalObjs > 0, summary, added, allScripts, anyStats
+end
+
+-- ---- Gambar lokal -> Decal / ImageLabel ----
+local FACES = { "Front", "Back", "Left", "Right", "Top", "Bottom" }
+local function faceList(name)
+    if name == "All" then return FACES end
+    return { name }
+end
+
+local function localAsset(entry)
+    local getAsset = getcustomasset or getsynasset
+    if not getAsset then return nil, "executor tidak punya getcustomasset (aset lokal tidak bisa dimuat)" end
+    local ok, asset = pcall(getAsset, entry.raw)
+    if not ok or type(asset) ~= "string" or asset == "" then
+        return nil, "gagal membuat aset lokal: " .. tostring(asset)
+    end
+    return asset
+end
+
+local function withNote(msg)
+    if not S.warnedLocal then
+        S.warnedLocal = true
+        return msg .. " | catatan: " .. LOCAL_NOTE
+    end
+    return msg
+end
+
+-- buat host decal: part papan (anchored) yang menghadap kamera. return part
+local function makeBoardPart(base, texture, w, h, target, placeState)
+    local longest = 8
+    local sx, sy
+    if w >= h then
+        sx, sy = longest, math.max(0.5, longest * h / w)
+    else
+        sy, sx = longest, math.max(0.5, longest * w / h)
+    end
+    local part = Instance.new("Part")
+    part.Name = base
+    part.Anchored = true
+    part.Size = Vector3.new(sx, sy, 0.2)
+    local d = Instance.new("Decal")
+    d.Name = base
+    d.Texture = texture
+    d.Face = Enum.NormalId.Front
+    d.Parent = part
+    local cam = workspace.CurrentCamera
+    if cam and isWorld(target) and CONFIG.SpawnInFrontOfCamera then
+        placeState = placeState or { offset = 0 }
+        local c = cam.CFrame
+        local pos = c.Position + c.LookVector * 25 + c.RightVector * (placeState.offset + sx / 2)
+        placeState.offset = placeState.offset + sx + 4
+        part.CFrame = CFrame.lookAt(pos, c.Position)
+    end
+    part.Parent = target
+    return part
+end
+
+-- terapkan texture ke host: BasePart terpilih (Studio Lite) / target part / papan baru.
+-- return: added (list), keterangan
+local function applyTexture(base, texture, w, h, target, placeState)
+    local added = {}
+    local parts = {}
+    local okS, sel = pcall(SEL.read)
+    if okS and type(sel) == "table" then
+        for _, i in ipairs(sel) do
+            if i:IsA("BasePart") and not isProtected(i) then parts[#parts + 1] = i end
+        end
+    end
+    if #parts == 0 and target:IsA("BasePart") and not isProtected(target) then parts = { target } end
+
+    if #parts > 0 then
+        for _, p in ipairs(parts) do
+            for _, f in ipairs(faceList(CONFIG.DecalFace)) do
+                local d = Instance.new("Decal")
+                d.Name = base
+                d.Texture = texture
+                d.Face = Enum.NormalId[f]
+                d.Parent = p
+                added[#added + 1] = d
+            end
+        end
+        return added, string.format("decal di %d part (sisi %s)", #parts, CONFIG.DecalFace)
+    end
+    local part = makeBoardPart(base, texture, w, h, target, placeState)
+    added[1] = part
+    return added, "papan decal baru"
+end
+
+local function importImageFile(entry, target, placeState)
+    local asset, err = localAsset(entry)
+    if not asset then return false, err end
+    local w, h
+    if readfile then
+        local okr, d = pcall(readfile, entry.raw)
+        if okr and type(d) == "string" then w, h = imageSize(d) end
+    end
+    w, h = w or 256, h or 256
+
+    local guiTarget = target:IsA("GuiObject") or target:IsA("LayerCollector")
+    if CONFIG.ImageMode == "gui" or guiTarget then
+        local added = {}
+        local host = target
+        if not guiTarget then
+            local sg = Instance.new("ScreenGui")
+            sg.Name = entry.base
+            sg.ResetOnSpawn = false
+            sg.Parent = target
+            added[#added + 1] = sg
+            host = sg
+        end
+        local lab = Instance.new("ImageLabel")
+        lab.Name = entry.base
+        lab.BackgroundTransparency = 1
+        lab.Image = asset
+        local k = math.min(1, 300 / math.max(w, h))
+        lab.Size = UDim2.fromOffset(math.max(8, math.floor(w * k)), math.max(8, math.floor(h * k)))
+        lab.Parent = host
+        if host == target then added[#added + 1] = lab end
+        return true, withNote(string.format("%s -> %s: ImageLabel %dx%d", entry.name, X.pathOf(target), w, h)),
+            added, {}, EMPTY_STATS()
+    end
+
+    local added, how = applyTexture(entry.base, asset, w, h, target, placeState)
+    return true, withNote(string.format("%s -> %s: %s (%dx%d)", entry.name, X.pathOf(target), how, w, h)),
+        added, {}, EMPTY_STATS()
+end
+
+-- ---- Audio lokal -> Sound ----
+local function makeSound(name, soundId, parent)
+    local s = Instance.new("Sound")
+    s.Name = name
+    s.SoundId = soundId
+    s.Volume = 0.5
+    s.Parent = parent
+    return s
+end
+
+local function importAudioFile(entry, target)
+    local asset, err = localAsset(entry)
+    if not asset then return false, err end
+    local s = makeSound(entry.base, asset, target)
+    return true, withNote(string.format("%s -> %s: Sound", entry.name, X.pathOf(target))), { s }, {}, EMPTY_STATS()
+end
+
+-- ---- Dispatcher ----
+-- entry: tabel entri scanner { raw, name, base, kind, ... } -> ok, pesan, added, scripts, stats
+local function doImport(entry, opts, placeState)
+    local target = opts.target
+    if typeof(target) ~= "Instance" or not target:IsDescendantOf(game) then
+        return false, "target import tidak ditemukan (dihapus?), pilih ulang di tab Explorer"
+    end
+    local kind = entry.kind or "model"
+    if kind == "place" then return importPlaceFile(entry, target, placeState) end
+    if kind == "image" then return importImageFile(entry, target, placeState) end
+    if kind == "audio" then return importAudioFile(entry, target) end
+    return importModelFile(entry, target, placeState)
 end
 
 -- ---- Batch import ----
@@ -1512,7 +2015,7 @@ function E.runBatch(list)
             fire("rows")
             task.wait()
 
-            local okc, ok, msg, added, scripts, stats = pcall(doImport, e.raw,
+            local okc, ok, msg, added, scripts, stats = pcall(doImport, e,
                 { target = E.getTarget() or tinst }, placeState)
             if not okc then
                 msg = tostring(ok)
@@ -2169,6 +2672,1430 @@ end)
 
 
 -- ===================================================================
+-- RIWAYAT (undo/redo), SELEKSI (terhubung ke Studio Lite), OPERASI
+-- ===================================================================
+
+-- ---- Riwayat perintah ----
+HIST.undoStack, HIST.redoStack = {}, {}
+
+function HIST.push(name, undoFn, redoFn)
+    HIST.undoStack[#HIST.undoStack + 1] = { name = name, undo = undoFn, redo = redoFn }
+    if #HIST.undoStack > 100 then table.remove(HIST.undoStack, 1) end
+    HIST.redoStack = {}
+    fire("hist")
+end
+
+function HIST.undo()
+    local c = table.remove(HIST.undoStack)
+    if not c then notify("Tidak ada aksi yang bisa di-undo.", "warn") return false end
+    local ok, err = pcall(c.undo)
+    if not ok then logLine("Undo '" .. c.name .. "' gagal: " .. tostring(err), "err") end
+    HIST.redoStack[#HIST.redoStack + 1] = c
+    setStatus("Undo: " .. c.name, "info")
+    fire("hist")
+    TOOL.update()
+    return ok
+end
+
+function HIST.redo()
+    local c = table.remove(HIST.redoStack)
+    if not c then notify("Tidak ada aksi yang bisa di-redo.", "warn") return false end
+    local ok, err = pcall(c.redo)
+    if not ok then logLine("Redo '" .. c.name .. "' gagal: " .. tostring(err), "err") end
+    HIST.undoStack[#HIST.undoStack + 1] = c
+    setStatus("Redo: " .. c.name, "info")
+    fire("hist")
+    TOOL.update()
+    return ok
+end
+
+-- ---- Seleksi: baca / tulis lewat hook bawaan Studio Lite, fallback seleksi internal ----
+-- Hook (dari dump): PlayerGui.StudioGui.ExplorerPanel.GetSelection / SetSelection (BindableFunction)
+-- dan Workspace.ExplorerSelectionChanged (BindableEvent).
+SEL.list, SEL.internal, SEL.mode, SEL.fails, SEL.hookDead = {}, {}, "internal", 0, false
+
+local function liveInst(i)
+    return typeof(i) == "Instance" and i:IsDescendantOf(game)
+end
+
+local function collectInstances(res)
+    local out, seen = {}, {}
+    local function add(i)
+        if liveInst(i) and not seen[i] then
+            seen[i] = true
+            out[#out + 1] = i
+        end
+    end
+    if typeof(res) == "Instance" then
+        add(res)
+    elseif type(res) == "table" then
+        for _, v in ipairs(res) do add(v) end
+        for k, v in pairs(res) do
+            if typeof(k) == "Instance" and v then add(k) elseif typeof(v) == "Instance" then add(v) end
+        end
+    end
+    return out
+end
+
+local function studioHook(name)
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    local sg = pg and pg:FindFirstChild("StudioGui")
+    local ep = sg and sg:FindFirstChild("ExplorerPanel")
+    local h = ep and ep:FindFirstChild(name)
+    if h and h:IsA("BindableFunction") then return h end
+    return nil
+end
+
+-- BindableFunction:Invoke tanpa OnInvoke akan menggantung selamanya, jadi selalu pakai batas waktu
+local function invokeTimeout(bf, timeout, ...)
+    local done, ok, res = false, false, nil
+    local args = table.pack(...)
+    local th = task.spawn(function()
+        local okc, r = pcall(function() return bf:Invoke(table.unpack(args, 1, args.n)) end)
+        ok, res, done = okc, r, true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < timeout do task.wait() end
+    if not done then
+        pcall(task.cancel, th)
+        return false, "timeout"
+    end
+    return ok, res
+end
+
+function SEL.read()
+    local h = (not SEL.hookDead) and studioHook("GetSelection") or nil
+    if h then
+        local ok, res = invokeTimeout(h, 0.6)
+        if ok then
+            SEL.mode, SEL.fails = "studio", 0
+            return collectInstances(res)
+        end
+        SEL.fails = SEL.fails + 1
+        if SEL.fails >= 3 then
+            SEL.hookDead = true
+            logLine("Hook GetSelection Studio Lite tidak merespons; memakai seleksi internal (tombol di tab Studio untuk mencoba lagi).", "warn")
+        end
+    end
+    SEL.mode = "internal"
+    return collectInstances(SEL.internal)
+end
+
+local function sameList(a, b)
+    if #a ~= #b then return false end
+    for i = 1, #a do
+        if a[i] ~= b[i] then return false end
+    end
+    return true
+end
+
+function SEL.refresh()
+    local new = SEL.read()
+    if sameList(new, SEL.list) then return false end
+    SEL.list = new
+    fire("selection2")
+    PLG.emit("selection", new)
+    TOOL.update()
+    return true
+end
+
+function SEL.set(list)
+    list = collectInstances(list)
+    SEL.internal = list
+    local h = (not SEL.hookDead) and studioHook("SetSelection") or nil
+    if h then
+        local ok = invokeTimeout(h, 0.6, list)
+        if not ok then SEL.fails = SEL.fails + 1 end
+    end
+    SEL.list = list
+    fire("selection2")
+    PLG.emit("selection", list)
+    TOOL.update()
+end
+
+function SEL.retryHook()
+    SEL.hookDead, SEL.fails = false, 0
+    SEL.refresh()
+end
+
+function SEL.connectEvents()
+    if SEL.evConn then return end
+    local ev = workspace:FindFirstChild("ExplorerSelectionChanged")
+    if ev and ev:IsA("BindableEvent") then
+        SEL.evConn = bind(ev.Event, function()
+            if SEL.pending then return end
+            SEL.pending = true
+            task.defer(function()
+                SEL.pending = false
+                if alive() then pcall(SEL.refresh) end
+            end)
+        end)
+    end
+end
+
+function SEL.start()
+    task.spawn(function()
+        local tick = 0
+        while alive() do
+            task.wait(0.6)
+            tick = tick + 1
+            if tick % 8 == 1 then SEL.connectEvents() end
+            local ok, err = pcall(SEL.refresh)
+            if not ok and tick % 20 == 1 then logLine("SEL.refresh: " .. tostring(err), "warn") end
+        end
+    end)
+end
+
+-- ---- Geometri bersama (dipakai OPS & TOOL) ----
+local function pivotOf(inst)
+    if inst:IsA("Model") then
+        local ok, cf = pcall(function() return inst:GetPivot() end)
+        return ok and cf or nil
+    elseif inst:IsA("BasePart") then
+        return inst.CFrame
+    end
+    return nil
+end
+
+local function setPivotOf(inst, cf)
+    if inst:IsA("Model") then
+        pcall(function() inst:PivotTo(cf) end)
+    elseif inst:IsA("BasePart") then
+        pcall(function() inst.CFrame = cf end)
+    end
+end
+
+local function itemBox(inst)
+    if inst:IsA("BasePart") then return inst.CFrame, inst.Size end
+    if inst:IsA("Model") then
+        local ok, cf, size = pcall(function() return inst:GetBoundingBox() end)
+        if ok and cf then return cf, size end
+    end
+    return nil
+end
+
+-- pusat & ukuran AABB dunia dari banyak item
+local function aabbOf(items)
+    local minV, maxV
+    local function take(p)
+        if not minV then
+            minV, maxV = p, p
+        else
+            minV = Vector3.new(math.min(minV.X, p.X), math.min(minV.Y, p.Y), math.min(minV.Z, p.Z))
+            maxV = Vector3.new(math.max(maxV.X, p.X), math.max(maxV.Y, p.Y), math.max(maxV.Z, p.Z))
+        end
+    end
+    for _, it in ipairs(items) do
+        local cf, size = itemBox(it)
+        if cf then
+            local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+            for sx = -1, 1, 2 do
+                for sy = -1, 1, 2 do
+                    for sz = -1, 1, 2 do
+                        take((cf * CFrame.new(sx * hx, sy * hy, sz * hz)).Position)
+                    end
+                end
+            end
+        end
+    end
+    if not minV then return nil end
+    return (minV + maxV) / 2, maxV - minV
+end
+
+-- item yang bisa ditransform: Model / BasePart tingkat atas yang tidak diproteksi
+local function xformItems(list)
+    local pool = {}
+    for _, i in ipairs(list) do
+        if (i:IsA("Model") or i:IsA("BasePart")) and not isProtected(i) then pool[#pool + 1] = i end
+    end
+    return topLevel(pool)
+end
+
+-- bingkai gizmo: CFrame pusat + ukuran. local+single = kotak berorientasi objek, selain itu AABB dunia
+local function gizmoFrame(items, space)
+    if #items == 0 then return nil end
+    if #items == 1 and space == "local" then
+        local cf, size = itemBox(items[1])
+        if cf then return cf, size end
+    end
+    local center, size = aabbOf(items)
+    if not center then return nil end
+    local rot = CFrame.new()
+    if space == "local" then
+        local pv = pivotOf(items[#items])
+        if pv then rot = pv - pv.Position end
+    end
+    return CFrame.new(center) * rot, size
+end
+
+local function captureState(items)
+    local out = {}
+    for _, it in ipairs(items) do
+        local st = { inst = it, pivot = pivotOf(it) }
+        if it:IsA("BasePart") then st.size = it.Size end
+        if it:IsA("Model") then
+            local ok, sc = pcall(function() return it:GetScale() end)
+            if ok then st.scale = sc end
+        end
+        if st.pivot then out[#out + 1] = st end
+    end
+    return out
+end
+
+local function applyState(st)
+    local inst = st.inst
+    if not inst or not inst:IsDescendantOf(game) then return end
+    if st.scale and inst:IsA("Model") then pcall(function() inst:ScaleTo(st.scale) end) end
+    if st.size and inst:IsA("BasePart") then pcall(function() inst.Size = st.size end) end
+    setPivotOf(inst, st.pivot)
+end
+
+local function applyStates(states)
+    for _, st in ipairs(states) do applyState(st) end
+end
+
+-- ---- Operasi atas seleksi ----
+local function needSel(silent)
+    pcall(SEL.refresh)
+    local list = {}
+    for _, i in ipairs(SEL.list) do
+        if not isProtected(i) then list[#list + 1] = i end
+    end
+    if #list == 0 then
+        if not silent then notify("Pilih objek dulu (di Studio Lite atau lewat tab Studio).", "warn") end
+        return nil
+    end
+    return list
+end
+
+local function partsOf(list, desc)
+    local out, seen = {}, {}
+    local function add(p)
+        if not seen[p] and p:IsA("BasePart") and not p:IsA("Terrain") then
+            seen[p] = true
+            out[#out + 1] = p
+        end
+    end
+    for _, i in ipairs(list) do
+        add(i)
+        if desc then
+            for _, d in ipairs(i:GetDescendants()) do add(d) end
+        end
+    end
+    return out
+end
+
+-- keadaan properti boolean pada seleksi: "on" / "off" / "mixed" / nil (tidak ada part)
+function OPS.stateOf(prop)
+    local parts = partsOf(SEL.list, CONFIG.OpDescendants)
+    if #parts == 0 then return nil, 0 end
+    local on, off = false, false
+    for i, p in ipairs(parts) do
+        if i > 3000 then break end
+        local ok, v = pcall(function() return p[prop] end)
+        if ok then
+            if v then on = true else off = true end
+        end
+        if on and off then return "mixed", #parts end
+    end
+    return (on and "on" or "off"), #parts
+end
+
+local BOOL_LABEL = { Anchored = "Anchor", CanCollide = "CanCollide", CanTouch = "CanTouch", CanQuery = "CanQuery" }
+
+-- mode: "on" | "off" | "toggle"
+function OPS.setBool(prop, mode)
+    local list = needSel()
+    if not list then return false end
+    local parts = partsOf(list, CONFIG.OpDescendants)
+    if #parts == 0 then notify("Seleksi tidak berisi part.", "warn") return false end
+    local anyFalse = false
+    for _, p in ipairs(parts) do
+        local ok, v = pcall(function() return p[prop] end)
+        if ok and v == false then anyFalse = true break end
+    end
+    local value
+    if mode == "on" then value = true elseif mode == "off" then value = false else value = anyFalse end
+    local old = {}
+    for i, p in ipairs(parts) do
+        local ok, v = pcall(function() return p[prop] end)
+        if ok then old[i] = v end -- false harus tetap tersimpan
+    end
+    local function setAll(vals)
+        for i, p in ipairs(parts) do
+            local v
+            if vals then v = vals[i] else v = value end
+            if v ~= nil and p:IsDescendantOf(game) then pcall(function() p[prop] = v end) end
+        end
+    end
+    setAll(nil)
+    local label = (BOOL_LABEL[prop] or prop) .. " " .. (value and "ON" or "OFF") .. " (" .. #parts .. ")"
+    HIST.push(label, function() setAll(old) end, function() setAll(nil) end)
+    notify(label, "ok")
+    fire("selection2")
+    return true
+end
+
+function OPS.group()
+    local list = needSel()
+    if not list then return false end
+    local items = topLevel(list)
+    if #items == 0 then return false end
+    local parent = items[1].Parent
+    local old = {}
+    local model = Instance.new("Model")
+    model.Name = "Model"
+    model.Parent = parent
+    for i, it in ipairs(items) do
+        old[i] = it.Parent
+        pcall(function() it.Parent = model end)
+    end
+    if #model:GetChildren() == 0 then
+        model:Destroy()
+        notify("Group gagal: objek tidak bisa dipindah.", "err")
+        return false
+    end
+    SEL.set({ model })
+    HIST.push("Group (" .. #items .. ")", function()
+        for i, it in ipairs(items) do pcall(function() it.Parent = old[i] end) end
+        model.Parent = nil
+        SEL.set(items)
+    end, function()
+        model.Parent = parent
+        for _, it in ipairs(items) do pcall(function() it.Parent = model end) end
+        SEL.set({ model })
+    end)
+    notify("Group: " .. #items .. " objek -> Model", "ok")
+    return true
+end
+
+local UNGROUPABLE = { Model = true, Folder = true, Actor = true }
+
+function OPS.ungroup()
+    local list = needSel()
+    if not list then return false end
+    local conts = {}
+    for _, i in ipairs(topLevel(list)) do
+        if UNGROUPABLE[i.ClassName] then conts[#conts + 1] = i end
+    end
+    if #conts == 0 then notify("Ungroup butuh Model / Folder yang terpilih.", "warn") return false end
+    local rec, all = {}, {}
+    for _, c in ipairs(conts) do
+        local parent = c.Parent
+        local kids = c:GetChildren()
+        rec[#rec + 1] = { c = c, parent = parent, kids = kids }
+        for _, k in ipairs(kids) do
+            if pcall(function() k.Parent = parent end) then all[#all + 1] = k end
+        end
+        c.Parent = nil
+    end
+    SEL.set(all)
+    HIST.push("Ungroup (" .. #conts .. ")", function()
+        for _, r in ipairs(rec) do
+            r.c.Parent = r.parent
+            for _, k in ipairs(r.kids) do pcall(function() k.Parent = r.c end) end
+        end
+        SEL.set(conts)
+    end, function()
+        for _, r in ipairs(rec) do
+            for _, k in ipairs(r.kids) do pcall(function() k.Parent = r.parent end) end
+            r.c.Parent = nil
+        end
+        SEL.set(all)
+    end)
+    notify(string.format("Ungroup: %d container, %d objek dilepas", #conts, #all), "ok")
+    return true
+end
+
+function OPS.delete()
+    local list = needSel()
+    if not list then return false end
+    local items = topLevel(list)
+    local old = {}
+    for i, it in ipairs(items) do
+        old[i] = it.Parent
+        it.Parent = nil
+    end
+    SEL.set({})
+    HIST.push("Hapus (" .. #items .. ")", function()
+        for i, it in ipairs(items) do pcall(function() it.Parent = old[i] end) end
+        SEL.set(items)
+    end, function()
+        for _, it in ipairs(items) do pcall(function() it.Parent = nil end) end
+        SEL.set({})
+    end)
+    notify("Dihapus: " .. #items .. " objek (bisa di-undo)", "ok")
+    return true
+end
+
+function OPS.duplicate()
+    local list = needSel()
+    if not list then return false end
+    local items = topLevel(list)
+    local clones, parents = {}, {}
+    for _, it in ipairs(items) do
+        local okc, c = pcall(function() return it:Clone() end)
+        if okc and c then
+            c.Parent = it.Parent
+            clones[#clones + 1] = c
+            parents[#parents + 1] = it.Parent
+        end
+    end
+    if #clones == 0 then notify("Duplikat gagal (objek tidak Archivable?).", "err") return false end
+    SEL.set(clones)
+    HIST.push("Duplikat (" .. #clones .. ")", function()
+        for _, c in ipairs(clones) do pcall(function() c.Parent = nil end) end
+        SEL.set(items)
+    end, function()
+        for i, c in ipairs(clones) do pcall(function() c.Parent = parents[i] end) end
+        SEL.set(clones)
+    end)
+    notify("Duplikat: " .. #clones .. " objek (di tempat yang sama)", "ok")
+    return true
+end
+
+-- Anchor semua part seleksi dan simpan nilai asli di atribut SL_OrigAnchored
+function OPS.freezeSel()
+    local list = needSel()
+    if not list then return false end
+    local parts = partsOf(list, true)
+    local changed = {}
+    for _, p in ipairs(parts) do
+        local ok, a = pcall(function() return p.Anchored end)
+        if ok and a == false then
+            pcall(function() p:SetAttribute("SL_OrigAnchored", false) end)
+            pcall(function() p.Anchored = true end)
+            changed[#changed + 1] = p
+        end
+    end
+    if #changed == 0 then notify("Semua part sudah ter-anchor.", "info") return false end
+    HIST.push("Freeze (" .. #changed .. ")", function()
+        for _, p in ipairs(changed) do
+            pcall(function() p.Anchored = false end)
+            pcall(function() p:SetAttribute("SL_OrigAnchored", nil) end)
+        end
+    end, function()
+        for _, p in ipairs(changed) do
+            pcall(function() p:SetAttribute("SL_OrigAnchored", false) end)
+            pcall(function() p.Anchored = true end)
+        end
+    end)
+    notify("Freeze: " .. #changed .. " part di-anchor", "ok")
+    return true
+end
+
+-- Kembalikan Anchored = false untuk part yang di-anchor otomatis (atribut SL_OrigAnchored)
+function OPS.restoreAnchors()
+    local list = needSel(true)
+    if not list then
+        local last = S.history[#S.history]
+        list = last and last.objs or nil
+        if not list then notify("Pilih objek (atau import dulu) lalu coba lagi.", "warn") return false end
+    end
+    local parts = partsOf(list, true)
+    local changed = {}
+    for _, p in ipairs(parts) do
+        local ok, orig = pcall(function() return p:GetAttribute("SL_OrigAnchored") end)
+        if ok and orig == false then changed[#changed + 1] = p end
+    end
+    if #changed == 0 then notify("Tidak ada part ber-anchor otomatis di seleksi.", "info") return false end
+    for _, p in ipairs(changed) do
+        pcall(function() p.Anchored = false end)
+        pcall(function() p:SetAttribute("SL_OrigAnchored", nil) end)
+    end
+    HIST.push("Lepas anchor asli (" .. #changed .. ")", function()
+        for _, p in ipairs(changed) do
+            pcall(function() p:SetAttribute("SL_OrigAnchored", false) end)
+            pcall(function() p.Anchored = true end)
+        end
+    end, function()
+        for _, p in ipairs(changed) do
+            pcall(function() p.Anchored = false end)
+            pcall(function() p:SetAttribute("SL_OrigAnchored", nil) end)
+        end
+    end)
+    notify("Anchor asli dikembalikan: " .. #changed .. " part", "ok")
+    return true
+end
+
+-- ---- Transform numerik / perintah transform (dipakai gizmo juga) ----
+function OPS.commitTransform(name, before, after)
+    HIST.push(name, function() applyStates(before) end, function() applyStates(after) end)
+end
+
+function OPS.setPosition(pos)
+    local list = needSel()
+    if not list then return false end
+    local items = xformItems(list)
+    if #items == 0 then return false end
+    local center = aabbOf(items)
+    if not center then return false end
+    local before = captureState(items)
+    local delta = pos - center
+    for _, st in ipairs(before) do setPivotOf(st.inst, st.pivot + delta) end
+    OPS.commitTransform("Posisi", before, captureState(items))
+    TOOL.update()
+    return true
+end
+
+-- derajat Euler (X, Y, Z), hanya untuk satu objek
+function OPS.setRotation(deg)
+    local list = needSel()
+    if not list then return false end
+    local items = xformItems(list)
+    if #items ~= 1 then notify("Rotasi numerik butuh tepat satu objek terpilih.", "warn") return false end
+    local before = captureState(items)
+    local pv = before[1] and before[1].pivot
+    if not pv then return false end
+    setPivotOf(items[1], CFrame.new(pv.Position) * CFrame.fromOrientation(math.rad(deg.X), math.rad(deg.Y), math.rad(deg.Z)))
+    OPS.commitTransform("Rotasi", before, captureState(items))
+    TOOL.update()
+    return true
+end
+
+-- Part: ukuran (Vector3). Model: skala seragam (angka)
+function OPS.setSize(value)
+    local list = needSel()
+    if not list then return false end
+    local items = xformItems(list)
+    if #items ~= 1 then notify("Ukuran numerik butuh tepat satu objek terpilih.", "warn") return false end
+    local it = items[1]
+    local before = captureState(items)
+    if it:IsA("BasePart") and typeof(value) == "Vector3" then
+        pcall(function()
+            it.Size = Vector3.new(math.clamp(value.X, 0.05, 2048), math.clamp(value.Y, 0.05, 2048), math.clamp(value.Z, 0.05, 2048))
+        end)
+    elseif it:IsA("Model") and type(value) == "number" then
+        pcall(function() it:ScaleTo(math.clamp(value, 0.01, 100)) end)
+        if before[1] then setPivotOf(it, before[1].pivot) end
+    else
+        return false
+    end
+    OPS.commitTransform("Ukuran", before, captureState(items))
+    TOOL.update()
+    return true
+end
+
+-- ---- Pilih cepat ----
+function OPS.selectChildren()
+    local list = needSel()
+    if not list then return false end
+    local out = {}
+    for _, i in ipairs(list) do
+        for _, c in ipairs(i:GetChildren()) do out[#out + 1] = c end
+    end
+    if #out == 0 then notify("Seleksi tidak punya anak.", "info") return false end
+    SEL.set(out)
+    return true
+end
+
+function OPS.selectTarget()
+    local t = E.getTarget()
+    if not t then notify("Target import tidak ditemukan.", "warn") return false end
+    SEL.set({ t })
+    return true
+end
+
+function OPS.selectLastImport()
+    local last = S.history[#S.history]
+    if not last or #last.objs == 0 then notify("Belum ada hasil import di sesi ini.", "warn") return false end
+    SEL.set(last.objs)
+    return true
+end
+
+function OPS.clearSelection()
+    SEL.set({})
+end
+
+-- ===================================================================
+-- TOOL: mode Geser / Putar / Skala dengan gizmo (Handles / ArcHandles) seperti Roblox Studio
+-- ===================================================================
+-- Gizmo = part proxy tak terlihat (di bawah Camera, bukan di Workspace asli supaya tidak ikut
+-- tersimpan oleh Save Studio Lite) + Handles/ArcHandles di GUI host. Semua perubahan lewat
+-- riwayat (HIST) sehingga bisa di-undo / redo.
+
+TOOL.mode = "select"
+TOOL.MOVE_SNAPS = { 0, 0.1, 0.25, 0.5, 1, 2, 4, 8 }
+TOOL.ROT_SNAPS = { 0, 1, 5, 15, 45, 90 }
+TOOL.SCALE_SNAPS = { 0, 0.1, 0.25, 0.5, 1 }
+TOOL.MODES = { "select", "move", "scale", "rotate" }
+TOOL.MODE_LABEL = { select = "Pilih", move = "Geser", scale = "Skala", rotate = "Putar" }
+
+local gz = { proxy = nil, gui = nil, handles = nil, hconns = {}, dragging = false, states = nil, startCF = nil, startSize = nil, built = nil }
+
+local function snapVal(v, step)
+    if not step or step <= 0 then return v end
+    return math.floor(v / step + 0.5) * step
+end
+TOOL.snapVal = snapVal
+
+local function gizmoHost()
+    if gz.gui and gz.gui.Parent then return gz.gui end
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "SLGizmoGui"
+    sg.ResetOnSpawn = false
+    sg.DisplayOrder = 997
+    pcall(function() sg:SetAttribute("SL_Gizmo", true) end)
+    local parented = false
+    if CoreGuiSvc then parented = pcall(function() sg.Parent = CoreGuiSvc end) and sg.Parent ~= nil end
+    if not parented and gethui then
+        local okh, h = pcall(gethui)
+        if okh and h then parented = pcall(function() sg.Parent = h end) and sg.Parent ~= nil end
+    end
+    if not parented then sg.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    gz.gui = sg
+    return sg
+end
+
+local function ensureProxy()
+    if gz.proxy and gz.proxy.Parent then return gz.proxy end
+    local p = Instance.new("Part")
+    p.Name = "__SLGizmo"
+    p.Anchored = true
+    p.CanCollide = false
+    p.CanQuery = false
+    p.CanTouch = false
+    p.CastShadow = false
+    p.Transparency = 1
+    p.Locked = true
+    p.Size = Vector3.new(2, 2, 2)
+    pcall(function() p:SetAttribute("SL_Gizmo", true) end)
+    p.Parent = workspace.CurrentCamera or workspace
+    gz.proxy = p
+    return p
+end
+
+local function dropHandles()
+    for _, c in ipairs(gz.hconns) do pcall(function() c:Disconnect() end) end
+    gz.hconns = {}
+    if gz.handles then pcall(function() gz.handles:Destroy() end) end
+    gz.handles = nil
+    gz.built = nil
+    gz.dragging = false
+end
+
+function TOOL.destroy()
+    dropHandles()
+    if gz.proxy then pcall(function() gz.proxy:Destroy() end) end
+    if gz.gui then pcall(function() gz.gui:Destroy() end) end
+    gz.proxy, gz.gui = nil, nil
+end
+
+local function beginDrag()
+    local items = xformItems(SEL.list)
+    gz.items = items
+    gz.states = captureState(items)
+    gz.startCF = gz.proxy.CFrame
+    gz.startSize = gz.proxy.Size
+    gz.dragging = true
+end
+
+local function endDrag(name)
+    if not gz.dragging then return end
+    gz.dragging = false
+    if gz.states and gz.items then
+        OPS.commitTransform(name, gz.states, captureState(gz.items))
+    end
+    gz.states, gz.items = nil, nil
+    TOOL.update()
+end
+
+local function bindHandle(sig, fn)
+    gz.hconns[#gz.hconns + 1] = sig:Connect(function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then logLine("Gizmo: " .. tostring(err), "err") end
+    end)
+end
+
+-- ---- Geser ----
+local function onMoveDrag(face, dist)
+    if not gz.dragging then return end
+    local d = snapVal(dist, CONFIG.MoveSnap)
+    local dir = gz.startCF:VectorToWorldSpace(Vector3.FromNormalId(face))
+    local delta = dir * d
+    for _, st in ipairs(gz.states) do setPivotOf(st.inst, st.pivot + delta) end
+    gz.proxy.CFrame = gz.startCF + delta
+end
+
+-- ---- Putar ----
+local function onRotDrag(axis, angle)
+    if not gz.dragging then return end
+    local a = angle * (CONFIG.RotateInvert and -1 or 1)
+    if CONFIG.RotSnap and CONFIG.RotSnap > 0 then a = snapVal(a, math.rad(CONFIG.RotSnap)) end
+    local axisW = gz.startCF:VectorToWorldSpace(Vector3.FromAxis(axis))
+    local center = gz.startCF.Position
+    local rot = CFrame.fromAxisAngle(axisW, a)
+    local around = CFrame.new(center) * rot * CFrame.new(-center)
+    for _, st in ipairs(gz.states) do setPivotOf(st.inst, around * st.pivot) end
+    if TOOL.space == "local" then
+        gz.proxy.CFrame = around * gz.startCF
+    end
+end
+
+-- ---- Skala ----
+local MIN_SIZE, MAX_SIZE = 0.05, 2048
+
+local function clampSize(v)
+    return Vector3.new(math.clamp(v.X, MIN_SIZE, MAX_SIZE), math.clamp(v.Y, MIN_SIZE, MAX_SIZE), math.clamp(v.Z, MIN_SIZE, MAX_SIZE))
+end
+
+local function onScaleDrag(face, dist)
+    if not gz.dragging then return end
+    local n = Vector3.FromNormalId(face)
+    local d = snapVal(dist, CONFIG.ScaleSnap)
+    local single = gz.states[1]
+    -- satu BasePart tanpa mode seragam: tarik satu sisi, sisi seberang tetap
+    if #gz.states == 1 and single.size and not single.scale and not CONFIG.UniformScale then
+        local absN = Vector3.new(math.abs(n.X), math.abs(n.Y), math.abs(n.Z))
+        local base = single.size.X * absN.X + single.size.Y * absN.Y + single.size.Z * absN.Z
+        local newLen = math.clamp(base + d, MIN_SIZE, MAX_SIZE)
+        local real = newLen - base
+        single.inst.Size = clampSize(single.size + absN * real)
+        single.inst.CFrame = single.pivot * CFrame.new(n * (real / 2))
+        gz.proxy.CFrame = gz.startCF * CFrame.new(n * (real / 2))
+        gz.proxy.Size = single.inst.Size
+        return
+    end
+    -- selain itu: faktor seragam (Model:ScaleTo menjaga weld / mesh / attachment tetap utuh)
+    local absN = Vector3.new(math.abs(n.X), math.abs(n.Y), math.abs(n.Z))
+    local extent = math.max(gz.startSize.X * absN.X + gz.startSize.Y * absN.Y + gz.startSize.Z * absN.Z, 0.5)
+    local f = math.clamp((extent + d) / extent, 0.02, 100)
+    local center = gz.startCF.Position
+    for _, st in ipairs(gz.states) do
+        if st.scale and st.inst:IsA("Model") then
+            pcall(function() st.inst:ScaleTo(st.scale * f) end)
+        end
+        if st.size and st.inst:IsA("BasePart") then
+            st.inst.Size = clampSize(st.size * f)
+        end
+        local pos = st.pivot.Position
+        local newPos = center + (pos - center) * f
+        setPivotOf(st.inst, CFrame.new(newPos) * (st.pivot - pos))
+    end
+    gz.proxy.Size = clampSize(gz.startSize * f)
+end
+
+local function allFaces()
+    return Faces.new(Enum.NormalId.Right, Enum.NormalId.Left, Enum.NormalId.Top, Enum.NormalId.Bottom, Enum.NormalId.Front, Enum.NormalId.Back)
+end
+
+local function buildHandles(mode)
+    dropHandles()
+    if mode == "select" then return end
+    local host, proxy = gizmoHost(), ensureProxy()
+    local h
+    if mode == "rotate" then
+        h = Instance.new("ArcHandles")
+        h.Axes = Axes.new(Enum.Axis.X, Enum.Axis.Y, Enum.Axis.Z)
+        h.Color3 = Color3.fromRGB(255, 170, 60)
+        bindHandle(h.MouseButton1Down, function() beginDrag() end)
+        bindHandle(h.MouseDrag, function(axis, angle) onRotDrag(axis, angle) end)
+        bindHandle(h.MouseButton1Up, function() endDrag("Putar") end)
+    else
+        h = Instance.new("Handles")
+        h.Faces = allFaces()
+        if mode == "move" then
+            h.Style = Enum.HandlesStyle.Movement
+            h.Color3 = Color3.fromRGB(80, 160, 255)
+            bindHandle(h.MouseButton1Down, function() beginDrag() end)
+            bindHandle(h.MouseDrag, function(face, dist) onMoveDrag(face, dist) end)
+            bindHandle(h.MouseButton1Up, function() endDrag("Geser") end)
+        else
+            h.Style = Enum.HandlesStyle.Resize
+            h.Color3 = Color3.fromRGB(90, 220, 140)
+            bindHandle(h.MouseButton1Down, function() beginDrag() end)
+            bindHandle(h.MouseDrag, function(face, dist) onScaleDrag(face, dist) end)
+            bindHandle(h.MouseButton1Up, function() endDrag("Skala") end)
+        end
+    end
+    h.Name = "SL_" .. mode
+    h.Adornee = proxy
+    h.Parent = host
+    gz.handles = h
+    gz.built = mode
+end
+
+-- sinkronkan gizmo dengan seleksi + mode. Aman dipanggil kapan saja.
+function TOOL.update()
+    if not alive() then return end
+    if gz.dragging then return end
+    if TOOL.mode == "select" then
+        if gz.handles then dropHandles() end
+        if gz.proxy then pcall(function() gz.proxy.Parent = nil end) end
+        return
+    end
+    local items = xformItems(SEL.list)
+    if #items == 0 then
+        if gz.handles then gz.handles.Visible = false end
+        return
+    end
+    local cf, size = gizmoFrame(items, TOOL.space)
+    if not cf then
+        if gz.handles then gz.handles.Visible = false end
+        return
+    end
+    local proxy = ensureProxy()
+    if proxy.Parent == nil then proxy.Parent = workspace.CurrentCamera or workspace end
+    proxy.Size = Vector3.new(math.max(size.X, 0.5), math.max(size.Y, 0.5), math.max(size.Z, 0.5))
+    proxy.CFrame = cf
+    if gz.built ~= TOOL.mode or not gz.handles then buildHandles(TOOL.mode) end
+    if gz.handles then gz.handles.Visible = true end
+end
+
+function TOOL.setMode(mode)
+    if not table.find(TOOL.MODES, mode) then return end
+    TOOL.mode = mode
+    if mode ~= "select" then pcall(SEL.refresh) end
+    TOOL.update()
+    fire("tool")
+    PLG.emit("tool", mode)
+end
+
+function TOOL.setSpace(space)
+    TOOL.space = (space == "local") and "local" or "global"
+    CONFIG.ToolSpace = TOOL.space
+    E.saveSettings()
+    TOOL.update()
+    fire("tool")
+end
+
+function TOOL.cycleSnap(kind, dir)
+    local list = (kind == "rot") and TOOL.ROT_SNAPS or (kind == "scale") and TOOL.SCALE_SNAPS or TOOL.MOVE_SNAPS
+    local key = (kind == "rot") and "RotSnap" or (kind == "scale") and "ScaleSnap" or "MoveSnap"
+    local idx = table.find(list, CONFIG[key]) or 1
+    idx = ((idx - 1 + (dir or 1)) % #list) + 1
+    CONFIG[key] = list[idx]
+    E.saveSettings()
+    fire("tool")
+end
+
+function TOOL.snapText(kind)
+    if kind == "rot" then return (CONFIG.RotSnap > 0) and (CONFIG.RotSnap .. "ТА") or "off" end
+    local v = (kind == "scale") and CONFIG.ScaleSnap or CONFIG.MoveSnap
+    return (v > 0) and tostring(v) or "off"
+end
+
+TOOL.space = "global"
+
+-- ===================================================================
+-- TOOLBOX (cari & insert aset Roblox, seperti Toolbox di Roblox Studio)
+-- ===================================================================
+TB.CATS = {
+    { id = "model", label = "Model", typeId = 10 },
+    { id = "decal", label = "Gambar", typeId = 13 },
+    { id = "audio", label = "Audio", typeId = 3 },
+}
+TB.SORTS = { { label = "Relevansi", v = 0 }, { label = "Terlaris", v = 1 }, { label = "Terbaru", v = 3 }, { label = "Rating", v = 4 } }
+TB.favs, TB.recent, TB.busy = {}, {}, false
+
+function TB.persist() return { favs = TB.favs, recent = TB.recent } end
+
+function TB.restore(t)
+    if type(t) ~= "table" then return end
+    local function clean(list, max)
+        local out = {}
+        if type(list) == "table" then
+            for _, it in ipairs(list) do
+                if type(it) == "table" and tonumber(it.id) and #out < max then
+                    out[#out + 1] = { id = tonumber(it.id), kind = tostring(it.kind or "model"),
+                        name = tostring(it.name or ("Asset " .. it.id)), creator = it.creator and tostring(it.creator) or nil }
+                end
+            end
+        end
+        return out
+    end
+    TB.favs, TB.recent = clean(t.favs, 60), clean(t.recent, 24)
+end
+
+local function urlenc(s)
+    return (tostring(s):gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end))
+end
+
+local function httpGet(url)
+    local req = (syn and syn.request) or request or http_request or (http and http.request)
+    if req then
+        local ok, res = pcall(req, { Url = url, Method = "GET", Headers = { Accept = "application/json" } })
+        if ok and type(res) == "table" then
+            local code = res.StatusCode or res.status_code
+            if (type(code) == "number" and code >= 200 and code < 300) or res.Success == true then
+                return res.Body
+            end
+            return nil, "HTTP " .. tostring(code or "?")
+        end
+        return nil, tostring(res)
+    end
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if ok and type(body) == "string" then return body end
+    return nil, tostring(body)
+end
+
+local function jsonDecode(body)
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
+-- ID dari angka / link (rbxassetid://123, create.roblox.com/store/asset/123/nama, dst.)
+function TB.parseId(text)
+    local n = tostring(text or ""):match("(%d%d%d+)")
+    return n and tonumber(n) or nil
+end
+
+-- return: items, nextCursor, err   (yield)
+function TB.search(cat, query, sortV, cursor, page)
+    local url = string.format("https://apis.roblox.com/toolbox-service/v1/marketplace/%d?limit=%d&sortType=%d&keyword=%s",
+        cat.typeId, CONFIG.ToolboxPageSize, sortV or 0, urlenc(query or ""))
+    if cursor then
+        url = url .. "&cursor=" .. urlenc(cursor)
+    elseif page and page > 0 then
+        url = url .. "&pageNumber=" .. page
+    end
+    local body, err = httpGet(url)
+    if not body then return nil, nil, err end
+    local data = jsonDecode(body)
+    if not data then return nil, nil, "respons Toolbox tidak valid" end
+    local rows = data.data or data.items or data.results or {}
+    local ids = {}
+    for _, r in ipairs(rows) do
+        local id = type(r) == "table" and (r.id or r.assetId or r.Id) or r
+        if tonumber(id) then ids[#ids + 1] = tonumber(id) end
+    end
+    local details = {}
+    if #ids > 0 then
+        local dbody = httpGet("https://apis.roblox.com/toolbox-service/v1/items/details?assetIds=" .. table.concat(ids, ","))
+        local dd = dbody and jsonDecode(dbody)
+        if dd then
+            for _, it in ipairs(dd.data or {}) do
+                local a = it.asset or it
+                local id = tonumber(a.id or a.assetId)
+                if id then
+                    details[id] = {
+                        name = a.name, desc = a.description,
+                        creator = it.creator and (it.creator.name or it.creator.Name) or nil,
+                    }
+                end
+            end
+        end
+    end
+    local items = {}
+    for _, id in ipairs(ids) do
+        local d = details[id] or {}
+        items[#items + 1] = { id = id, kind = cat.id, name = d.name or ("Asset " .. id), creator = d.creator, desc = d.desc }
+    end
+    return items, data.nextPageCursor, nil
+end
+
+-- file mentah aset (untuk membaca teks script di dalam model Toolbox)
+function TB.fetchRaw(id)
+    local function isRbx(b) return type(b) == "string" and (b:sub(1, 8) == "<roblox!" or b:sub(1, 7) == "<roblox") end
+    local body = httpGet("https://assetdelivery.roblox.com/v1/asset/?id=" .. id)
+    if isRbx(body) then return body end
+    local meta = httpGet("https://assetdelivery.roblox.com/v2/assetId/" .. id)
+    local j = meta and jsonDecode(meta)
+    local loc = j and j.locations and j.locations[1] and j.locations[1].location
+    if loc then
+        local b2 = httpGet(loc)
+        if isRbx(b2) then return b2 end
+    end
+    return nil
+end
+
+local function hasScriptInside(objs)
+    for _, o in ipairs(objs) do
+        if o:IsA("LuaSourceContainer") then return true end
+        for _, d in ipairs(o:GetDescendants()) do
+            if d:IsA("LuaSourceContainer") then return true end
+        end
+    end
+    return false
+end
+
+-- return: ok, pesan, added, scripts, stats   (yield)
+function TB.insert(item, target, placeState)
+    if item.kind == "audio" then
+        local host = target
+        local s = makeSound(item.name, "rbxassetid://" .. item.id, host)
+        return true, string.format("%s -> %s: Sound (id %d)", item.name, X.pathOf(host), item.id), { s }, {}, EMPTY_STATS()
+    end
+
+    local okg, objs = pcall(function() return game:GetObjects("rbxassetid://" .. item.id) end)
+    local have = okg and type(objs) == "table" and #objs > 0
+
+    if item.kind == "decal" then
+        local texture = "rbxassetid://" .. item.id
+        if have and objs[1]:IsA("Decal") then
+            local okt, t = pcall(function() return objs[1].Texture end)
+            if okt and type(t) == "string" and t ~= "" then texture = t end
+        end
+        local added, how = applyTexture(item.name, texture, 256, 256, target, placeState)
+        return true, string.format("%s -> %s: %s (id %d)", item.name, X.pathOf(target), how, item.id), added, {}, EMPTY_STATS()
+    end
+
+    if not have then
+        return false, string.format("GetObjects gagal untuk id %d (aset privat / bukan model?): %s", item.id, tostring(objs))
+    end
+    local roots, perr
+    if hasScriptInside(objs) then
+        local raw = TB.fetchRaw(item.id)
+        if raw then roots, perr = parseOrNil(raw) end
+        if not roots then perr = perr or "teks script aset tidak bisa diambil (aset terproteksi)" end
+    end
+    return finishImport(objs, roots, item.name, "toolbox", target, { placeState = placeState, parseErr = perr })
+end
+
+function TB.pushRecent(item)
+    for i, it in ipairs(TB.recent) do
+        if it.id == item.id then table.remove(TB.recent, i) break end
+    end
+    table.insert(TB.recent, 1, { id = item.id, kind = item.kind, name = item.name, creator = item.creator })
+    while #TB.recent > 24 do table.remove(TB.recent) end
+    E.saveSettings()
+end
+
+function TB.isFav(id)
+    for _, it in ipairs(TB.favs) do
+        if it.id == id then return true end
+    end
+    return false
+end
+
+function TB.toggleFav(item)
+    for i, it in ipairs(TB.favs) do
+        if it.id == item.id then
+            table.remove(TB.favs, i)
+            E.saveSettings()
+            return false
+        end
+    end
+    table.insert(TB.favs, 1, { id = item.id, kind = item.kind, name = item.name, creator = item.creator })
+    while #TB.favs > 60 do table.remove(TB.favs) end
+    E.saveSettings()
+    return true
+end
+
+-- insert dari UI: target = target import aktif, hasil masuk riwayat Undo
+function E.insertAsset(item)
+    if TB.busy or S.busy then notify("Masih ada proses berjalan.", "warn") return end
+    local target = E.getTarget()
+    if not target then notify("Target import tidak ditemukan. Pilih di tab Explorer.", "err") return end
+    X.pushRecent(target)
+    TB.busy = true
+    fire("toolbox")
+    task.spawn(function()
+        local okc, ok, msg, added = pcall(TB.insert, item, target, { offset = 0 })
+        if not okc then ok, msg = false, tostring(ok) end
+        if ok and added and #added > 0 then
+            S.history[#S.history + 1] = { objs = added, target = X.pathOf(target), count = 1 }
+            if #S.history > 20 then table.remove(S.history, 1) end
+            TB.pushRecent(item)
+            notify(msg, "ok")
+            PLG.emit("import", added)
+            fire("history")
+        else
+            notify(tostring(msg), "err")
+        end
+        TB.busy = false
+        fire("toolbox")
+    end)
+end
+
+-- ===================================================================
+-- PLUGIN (kode Lua pengguna dengan API SL, dipasang dari folder plugins)
+-- ===================================================================
+PLG.dir = CONFIG.Folder .. "/plugins"
+PLG.list, PLG.byKey, PLG.enabled = {}, {}, {}
+PLG.handlers = { selection = {}, import = {}, tool = {}, unload = {} }
+
+function PLG.enabledLoad(t)
+    PLG.enabled = {}
+    if type(t) == "table" then
+        for k, v in pairs(t) do
+            if type(k) == "string" and v == true then PLG.enabled[k] = true end
+        end
+    end
+end
+
+function PLG.emit(name, ...)
+    local hs = PLG.handlers[name]
+    if not hs or #hs == 0 then return end
+    local copy = { table.unpack(hs) }
+    for _, h in ipairs(copy) do
+        local ok, err = pcall(h.fn, ...)
+        if not ok then logLine("[plugin " .. h.p.key .. "] " .. name .. ": " .. tostring(err), "err") end
+    end
+end
+
+local function readMeta(src, key)
+    local meta = { name = key, version = "", author = "", desc = "" }
+    local n = 0
+    for line in (src:sub(1, 2000) .. "\n"):gmatch("([^\r\n]*)[\r\n]") do
+        n = n + 1
+        if n > 25 then break end
+        local k, v = line:match("^%-%-@(%w+)%s+(.-)%s*$")
+        if k and meta[k:lower()] ~= nil then meta[k:lower()] = v end
+    end
+    return meta
+end
+
+function PLG.scan()
+    if not (listfiles and isfolder) then
+        notify("Executor tidak punya listfiles; plugin tidak bisa dipindai.", "warn")
+        return
+    end
+    if makefolder and not isfolder(PLG.dir) then pcall(makefolder, PLG.dir) end
+    local ok, files = pcall(listfiles, PLG.dir)
+    if not ok or type(files) ~= "table" then return end
+    local found = {}
+    for _, raw in ipairs(files) do
+        local path = (tostring(raw):gsub("\\", "/"))
+        local name = path:match("([^/]+)$") or path
+        local low = name:lower()
+        if low:match("%.lua$") or low:match("%.luau$") or low:match("%.txt$") then
+            local p = PLG.byKey[name] or { key = name, loaded = false }
+            p.path, p.raw = path, raw
+            local src = ""
+            if readfile then
+                local okr, d = pcall(readfile, raw)
+                if okr and type(d) == "string" then src = d end
+            end
+            p.meta = readMeta(src, name)
+            p.size = #src
+            PLG.byKey[name] = p
+            found[#found + 1] = p
+        end
+    end
+    table.sort(found, function(a, b) return a.key:lower() < b.key:lower() end)
+    PLG.list = found
+    fire("plugins")
+end
+
+local function storagePath(p)
+    return PLG.dir .. "/_data/" .. (p.key:gsub("[^%w_%-%.]", "_")) .. ".json"
+end
+
+local function makeApi(p)
+    local api = { version = "5.0", name = p.meta.name or p.key }
+    p.conns, p.mine = {}, {}
+
+    function api.notify(text, kind) notify("[" .. api.name .. "] " .. tostring(text), kind or "info") end
+    function api.log(text) logLine("[" .. api.name .. "] " .. tostring(text), "info") end
+
+    api.selection = {
+        get = function() local o = {} for i, v in ipairs(SEL.list) do o[i] = v end return o end,
+        refresh = function() SEL.refresh() local o = {} for i, v in ipairs(SEL.list) do o[i] = v end return o end,
+        set = function(list) SEL.set(list or {}) end,
+    }
+    api.ops = {
+        anchor = function(m) return OPS.setBool("Anchored", m or "toggle") end,
+        canCollide = function(m) return OPS.setBool("CanCollide", m or "toggle") end,
+        canTouch = function(m) return OPS.setBool("CanTouch", m or "toggle") end,
+        canQuery = function(m) return OPS.setBool("CanQuery", m or "toggle") end,
+        group = OPS.group, ungroup = OPS.ungroup, delete = OPS.delete, duplicate = OPS.duplicate,
+        freeze = OPS.freezeSel, restoreAnchors = OPS.restoreAnchors,
+        setPosition = OPS.setPosition, setRotation = OPS.setRotation, setSize = OPS.setSize,
+    }
+    api.history = { push = HIST.push, undo = HIST.undo, redo = HIST.redo }
+    api.tools = {
+        setMode = TOOL.setMode, getMode = function() return TOOL.mode end,
+        setSpace = TOOL.setSpace, getSpace = function() return TOOL.space end,
+        setSnap = function(kind, v)
+            local key = (kind == "rot") and "RotSnap" or (kind == "scale") and "ScaleSnap" or "MoveSnap"
+            if type(v) == "number" and v >= 0 then CONFIG[key] = v E.saveSettings() fire("tool") end
+        end,
+        getSnap = function(kind)
+            return CONFIG[(kind == "rot") and "RotSnap" or (kind == "scale") and "ScaleSnap" or "MoveSnap"]
+        end,
+    }
+    api.target = { get = E.getTarget, set = E.setTarget }
+    api.insertAsset = function(id, kind)
+        local n = TB.parseId(id)
+        if n then E.insertAsset({ id = n, kind = kind or "model", name = "Asset " .. n }) end
+    end
+    api.importFile = function(path)
+        local entry = makeEntry(path)
+        if entry then E.runBatch({ entry }) else notify("Format file tidak dikenali: " .. tostring(path), "warn") end
+    end
+
+    function api.on(event, fn)
+        local hs = PLG.handlers[event]
+        if not hs or type(fn) ~= "function" then return function() end end
+        local h = { p = p, fn = fn }
+        hs[#hs + 1] = h
+        p.mine[#p.mine + 1] = { list = hs, h = h }
+        return function()
+            local i = table.find(hs, h)
+            if i then table.remove(hs, i) end
+        end
+    end
+    function api.connect(signal, fn)
+        local c = signal:Connect(fn)
+        p.conns[#p.conns + 1] = c
+        return c
+    end
+
+    api.storage = {
+        get = function(key)
+            if not (isfile and readfile) then return nil end
+            local okf, exists = pcall(isfile, storagePath(p))
+            if not (okf and exists) then return nil end
+            local okr, raw = pcall(readfile, storagePath(p))
+            local t = okr and jsonDecode(raw)
+            return t and t[key]
+        end,
+        set = function(key, value)
+            if not writefile then return false end
+            if makefolder and isfolder and not isfolder(PLG.dir .. "/_data") then pcall(makefolder, PLG.dir .. "/_data") end
+            local t = {}
+            if isfile and readfile and isfile(storagePath(p)) then
+                local okr, raw = pcall(readfile, storagePath(p))
+                t = (okr and jsonDecode(raw)) or {}
+            end
+            t[key] = value
+            local okj, json = pcall(function() return HttpService:JSONEncode(t) end)
+            return okj and pcall(writefile, storagePath(p), json)
+        end,
+    }
+    api.ui = {
+        button = function(text, cb) return H.pluginButton and H.pluginButton(p, tostring(text), cb) or nil end,
+        panel = function(height) return H.pluginPanel and H.pluginPanel(p, tonumber(height) or 80) or nil end,
+    }
+    return api
+end
+
+function PLG.unload(p)
+    if not p.loaded then return end
+    for _, m in ipairs(p.mine or {}) do
+        local i = table.find(m.list, m.h)
+        if i then table.remove(m.list, i) end
+    end
+    for _, c in ipairs(p.conns or {}) do pcall(function() c:Disconnect() end) end
+    if p.api and p.api._unload then pcall(p.api._unload) end
+    if H.pluginClear then pcall(H.pluginClear, p) end
+    p.loaded, p.api, p.conns, p.mine = false, nil, nil, nil
+    fire("plugins")
+end
+
+function PLG.load(p)
+    if p.loaded then PLG.unload(p) end
+    p.err = nil
+    if not (readfile and loadstring) then
+        p.err = "executor tidak punya readfile / loadstring"
+        fire("plugins")
+        return false
+    end
+    local okr, src = pcall(readfile, p.raw or p.path)
+    if not okr or type(src) ~= "string" then
+        p.err = "file tidak bisa dibaca"
+        fire("plugins")
+        return false
+    end
+    local fn, err = loadstring("local SL, plugin = ...\n" .. src, "=" .. p.key)
+    if not fn then
+        p.err = tostring(err)
+        logLine("[plugin " .. p.key .. "] syntax: " .. p.err, "err")
+        fire("plugins")
+        return false
+    end
+    local api = makeApi(p)
+    p.api, p.loaded = api, true
+    function api.onUnload(f) api._unload = f end
+    task.spawn(function()
+        local ok, e = pcall(fn, api, api)
+        if not ok then
+            p.err = tostring(e)
+            logLine("[plugin " .. p.key .. "] error: " .. p.err, "err")
+            PLG.unload(p)
+            p.err = tostring(e)
+            fire("plugins")
+        else
+            logLine("Plugin dimuat: " .. api.name, "ok")
+        end
+    end)
+    fire("plugins")
+    return true
+end
+
+function PLG.enable(p)
+    PLG.enabled[p.key] = true
+    E.saveSettings()
+    return PLG.load(p)
+end
+
+function PLG.disable(p)
+    PLG.enabled[p.key] = nil
+    E.saveSettings()
+    PLG.unload(p)
+end
+
+function PLG.loadEnabled()
+    for _, p in ipairs(PLG.list) do
+        if PLG.enabled[p.key] and not p.loaded then PLG.load(p) end
+    end
+end
+
+function PLG.save(name, src)
+    if not writefile then return false, "executor tidak punya writefile" end
+    name = tostring(name or ""):gsub("[^%w_%-%.]", "_")
+    if name == "" then name = "plugin" end
+    if not name:lower():match("%.lua$") then name = name .. ".lua" end
+    if makefolder and isfolder and not isfolder(PLG.dir) then pcall(makefolder, PLG.dir) end
+    local ok, err = pcall(writefile, PLG.dir .. "/" .. name, src)
+    if not ok then return false, tostring(err) end
+    PLG.scan()
+    return true, name
+end
+
+PLG.SAMPLES = {
+    ["contoh_info.lua"] = [==[
+--@name Info Seleksi
+--@version 1.0
+--@author contoh
+--@desc Tombol yang menampilkan ringkasan seleksi + log tiap seleksi berubah.
+SL.ui.button("Info seleksi", function()
+    local sel = SL.selection.refresh()
+    SL.notify(#sel .. " objek terpilih", "info")
+    for i, inst in ipairs(sel) do
+        if i > 5 then break end
+        SL.log(inst:GetFullName() .. " [" .. inst.ClassName .. "]")
+    end
+end)
+SL.on("selection", function(list)
+    SL.log("seleksi berubah: " .. #list .. " objek")
+end)
+]==],
+    ["contoh_snap.lua"] = [==[
+--@name Snap Cepat
+--@version 1.0
+--@author contoh
+--@desc Tombol pintasan untuk mode Geser dan snap 0.5 stud.
+SL.ui.button("Geser + snap 0.5", function()
+    SL.tools.setSnap("move", 0.5)
+    SL.tools.setMode("move")
+    SL.notify("Mode Geser, snap 0.5")
+end)
+SL.ui.button("Putar + snap 15", function()
+    SL.tools.setSnap("rot", 15)
+    SL.tools.setMode("rotate")
+end)
+]==],
+}
+
+function PLG.writeSamples()
+    local n = 0
+    for name, src in pairs(PLG.SAMPLES) do
+        if PLG.save(name, src) then n = n + 1 end
+    end
+    return n
+end
+
+function E.shutdown()
+    for _, p in ipairs(PLG.list) do
+        if p.loaded then pcall(PLG.unload, p) end
+    end
+    pcall(TOOL.destroy)
+end
+
+-- ===================================================================
 -- GUI
 -- ===================================================================
 
@@ -2185,8 +4112,9 @@ local function buildGui()
         white = Color3.new(1, 1, 1),
     }
     local KIND = { info = T.text, ok = T.okText, warn = T.warn, err = T.err }
-    local TITLE_H, STATUS_H, TAB_H, ROW_H = 34, 26, 30, 36
-    local MIN_W, MIN_H = 380, 260
+    local KIND_COLOR = { model = T.accent, place = T.warn, image = T.okText, audio = T.purple }
+    local TITLE_H, STATUS_H, TAB_H, ROW_H, TOOL_H = 34, 26, 30, 36, 32
+    local MIN_W, MIN_H = 380, 300
 
     local function make(class, props, parent)
         local o = Instance.new(class)
@@ -2253,6 +4181,7 @@ local function buildGui()
     env.__SLImporterGui = gui
     env.__SLImporterCleanup = function()
         env.__SLImporterRun = nil
+        if E.shutdown then pcall(E.shutdown) end
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         pcall(function() gui:Destroy() end)
         env.__SLImporterGui = nil
@@ -2462,53 +4391,82 @@ local function buildGui()
     local btnMax = iconButton("max", -64)
     local btnClose = iconButton("close", -34)
 
-    -- ---- Body, tab, halaman ----
+    -- ---- Body, toolbar, tab, halaman ----
+    local UI = {} -- fungsi lintas-bagian (hindari terlalu banyak local di buildGui)
     local Body = make("Frame", {
         Name = "Body", Position = UDim2.fromOffset(0, TITLE_H),
         Size = UDim2.new(1, 0, 1, -(TITLE_H + STATUS_H)), BackgroundTransparency = 1,
     }, Main)
-    local TabBar = make("Frame", {
+    local ToolBar = make("ScrollingFrame", {
+        Name = "Toolbar", Size = UDim2.new(1, 0, 0, TOOL_H), BackgroundColor3 = T.titleBar, BorderSizePixel = 0,
+        ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X,
+        ScrollingDirection = Enum.ScrollingDirection.X,
+    }, Body)
+    make("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4),
+        VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder,
+    }, ToolBar)
+    make("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, ToolBar)
+    local TabBar = make("ScrollingFrame", {
         Size = UDim2.new(1, 0, 0, TAB_H), BackgroundColor3 = T.panel, BorderSizePixel = 0,
+        ScrollBarThickness = 0, CanvasSize = UDim2.new(),
+        ScrollingDirection = Enum.ScrollingDirection.X,
     }, Body)
-    local Pages = make("Frame", {
-        Position = UDim2.fromOffset(0, TAB_H), Size = UDim2.new(1, 0, 1, -TAB_H), BackgroundTransparency = 1,
-    }, Body)
-    local PF = make("Frame", { Name = "Files", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, Pages)
-    local PL = make("Frame", { Name = "Log", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
-    local PS = make("Frame", { Name = "Settings", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
-    local PE = make("Frame", { Name = "Explorer", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, Pages)
+    local Pages = make("Frame", { BackgroundTransparency = 1 }, Body)
+    local function newPage(name, visible)
+        return make("Frame", { Name = name, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = visible or false }, Pages)
+    end
+    local PF = newPage("Files", true)
+    local PT = newPage("Toolbox")
+    local PST = newPage("Studio")
+    local PE = newPage("Explorer")
+    local PP = newPage("Plugins")
+    local PL = newPage("Log")
+    local PS = newPage("Settings")
 
-    local tabDefs = { { "files", "Files", PF }, { "explorer", "Explorer", PE }, { "log", "Log", PL },
-        { "set", "Pengaturan", PS } }
+    local function layoutBody()
+        local th = CONFIG.ShowToolbar and TOOL_H or 0
+        ToolBar.Visible = th > 0
+        TabBar.Position = UDim2.fromOffset(0, th)
+        Pages.Position = UDim2.fromOffset(0, th + TAB_H)
+        Pages.Size = UDim2.new(1, 0, 1, -(th + TAB_H))
+    end
+    layoutBody()
+
+    local tabDefs = {
+        { "files", "Files", PF }, { "toolbox", "Toolbox", PT }, { "studio", "Studio", PST },
+        { "explorer", "Explorer", PE }, { "plugins", "Plugin", PP }, { "log", "Log", PL }, { "set", "Setelan", PS },
+    }
     local curTab = "files"
     local syncExplorer -- diisi di bagian halaman Explorer
-    local tabBtns = {}
-    local tabInd = make("Frame", {
-        Size = UDim2.new(1 / #tabDefs, -16, 0, 2), Position = UDim2.new(0, 8, 1, -2),
-        BackgroundColor3 = T.accent, BorderSizePixel = 0,
-    }, TabBar)
-    corner(tabInd, 1)
+    local tabBtns, tabInds, onTab = {}, {}, {}
     local function setTab(id)
         curTab = id
-        for i, d in ipairs(tabDefs) do
+        for _, d in ipairs(tabDefs) do
             local on = d[1] == id
             d[3].Visible = on
             tabBtns[d[1]].TextColor3 = on and T.text or T.sub
-            if on then
-                tween(tabInd, 0.15, { Position = UDim2.new((i - 1) / #tabDefs, 8, 1, -2) })
-            end
+            tabInds[d[1]].Visible = on
         end
+        if onTab[id] then pcall(onTab[id]) end
         if syncExplorer then syncExplorer() end
     end
     for i, d in ipairs(tabDefs) do
         local tb = make("TextButton", {
-            Text = d[2], Size = UDim2.new(1 / #tabDefs, 0, 1, -2), Position = UDim2.new((i - 1) / #tabDefs, 0, 0, 0),
+            Text = d[2], Size = UDim2.new(0, 70, 1, -2), Position = UDim2.fromOffset((i - 1) * 70, 0),
             BackgroundTransparency = 1, TextColor3 = T.sub, Font = Enum.Font.GothamMedium, TextSize = 12,
             AutoButtonColor = false, BorderSizePixel = 0,
         }, TabBar)
         tabBtns[d[1]] = tb
+        local ind = make("Frame", {
+            Size = UDim2.new(1, -16, 0, 2), Position = UDim2.new(0, 8, 1, 0), AnchorPoint = Vector2.new(0, 1),
+            BackgroundColor3 = T.accent, BorderSizePixel = 0, Visible = false,
+        }, tb)
+        corner(ind, 1)
+        tabInds[d[1]] = ind
         bind(tb.MouseButton1Click, function() setTab(d[1]) end)
     end
+    TabBar.CanvasSize = UDim2.fromOffset(#tabDefs * 70, 0)
 
     -- ---- Status bar + progress ----
     local StatusBar = make("Frame", {
@@ -2710,6 +4668,132 @@ local function buildGui()
         end
     end
 
+    -- ---- Pratinjau audio (dipakai tab Files & Toolbox) ----
+    local pv = { sound = nil, label = nil }
+    local function stopPreview()
+        if pv.sound then pcall(function() pv.sound:Stop() pv.sound:Destroy() end) end
+        pv.sound = nil
+        if pv.label then
+            local f = pv.label
+            pv.label = nil
+            f("Putar")
+        end
+    end
+    local function startPreview(url, setLabel)
+        stopPreview()
+        local s = Instance.new("Sound")
+        s.SoundId = url
+        s.Volume = 0.6
+        s.Parent = gui
+        pv.sound, pv.label = s, setLabel
+        setLabel("Stop")
+        s:Play()
+        bind(s.Ended, function()
+            if pv.sound == s then stopPreview() end
+        end)
+        task.delay(8, function()
+            if alive() and pv.sound == s and not s.IsLoaded then
+                stopPreview()
+                setStatus("Audio gagal dimuat (privat / tidak diizinkan / file bermasalah).", "warn")
+            end
+        end)
+    end
+
+    do
+    -- ===============================================================
+    -- TOOLBAR (mode alat, ruang, snap, aksi cepat, undo/redo)
+    -- ===============================================================
+    local tbOrder = 0
+    local function tbBtn(text, w, fn)
+        tbOrder = tbOrder + 1
+        local b = button(ToolBar, text, T.panel2, { Size = UDim2.fromOffset(w, 24), TextSize = 11, LayoutOrder = tbOrder })
+        if fn then bind(b.MouseButton1Click, fn) end
+        return b
+    end
+    local function tbSep()
+        tbOrder = tbOrder + 1
+        make("Frame", { Size = UDim2.fromOffset(1, 18), BackgroundColor3 = T.line, BorderSizePixel = 0, LayoutOrder = tbOrder }, ToolBar)
+    end
+    local modeBtns = {}
+    for _, m in ipairs(TOOL.MODES) do
+        modeBtns[m] = tbBtn(TOOL.MODE_LABEL[m], 50, function() TOOL.setMode(m) end)
+    end
+    tbSep()
+    local spaceBtn = tbBtn("Global", 58, function() TOOL.setSpace(TOOL.space == "global" and "local" or "global") end)
+    local snapBtn = tbBtn("Snap", 78, nil)
+    tbSep()
+    local anchorBtn = tbBtn("Anchor", 56, function() task.spawn(OPS.setBool, "Anchored", "toggle") end)
+    local collideBtn = tbBtn("Collide", 56, function() task.spawn(OPS.setBool, "CanCollide", "toggle") end)
+    local groupBtn = tbBtn("Group", 52, function() task.spawn(OPS.group) end)
+    local ungroupBtn = tbBtn("Ungroup", 62, function() task.spawn(OPS.ungroup) end)
+    tbSep()
+    local tbUndo = tbBtn("Undo", 44, function() task.spawn(HIST.undo) end)
+    local tbRedo = tbBtn("Redo", 44, function() task.spawn(HIST.redo) end)
+
+    local function snapKind()
+        return (TOOL.mode == "rotate") and "rot" or (TOOL.mode == "scale") and "scale" or "move"
+    end
+    local function snapOptions(kind)
+        local list = (kind == "rot") and TOOL.ROT_SNAPS or (kind == "scale") and TOOL.SCALE_SNAPS or TOOL.MOVE_SNAPS
+        local opts = {}
+        for _, v in ipairs(list) do
+            opts[#opts + 1] = { text = (v == 0) and "Off" or (tostring(v) .. (kind == "rot" and " derajat" or " stud")), value = v }
+        end
+        return opts
+    end
+    local function snapKey(kind)
+        return (kind == "rot") and "RotSnap" or (kind == "scale") and "ScaleSnap" or "MoveSnap"
+    end
+    local function pickSnap(anchor, kind)
+        dropdown(anchor, snapOptions(kind), CONFIG[snapKey(kind)], function(v)
+            CONFIG[snapKey(kind)] = v
+            E.saveSettings()
+            fire("tool")
+        end)
+    end
+    bind(snapBtn.MouseButton1Click, function() pickSnap(snapBtn, snapKind()) end)
+
+    local function stateColor(btn, st)
+        if st == "on" then
+            btn.BackgroundColor3, btn.TextColor3 = T.accent, T.white
+        elseif st == "mixed" then
+            btn.BackgroundColor3, btn.TextColor3 = Color3.fromRGB(150, 105, 35), T.white
+        else
+            btn.BackgroundColor3 = T.panel2
+            btn.TextColor3 = (st == "off") and T.text or T.sub
+        end
+    end
+
+    local function paintToolbar()
+        for m, b in pairs(modeBtns) do
+            local on = TOOL.mode == m
+            b.BackgroundColor3 = on and T.accent or T.panel2
+            b.TextColor3 = on and T.white or T.text
+        end
+        spaceBtn.Text = (TOOL.space == "global") and "Global" or "Lokal"
+        local kind = snapKind()
+        snapBtn.Text = ((kind == "rot") and "Putar " or (kind == "scale") and "Skala " or "Geser ") .. TOOL.snapText(kind)
+        stateColor(anchorBtn, (OPS.stateOf("Anchored")))
+        stateColor(collideBtn, (OPS.stateOf("CanCollide")))
+        local hasSel = #SEL.list > 0
+        groupBtn.TextColor3 = hasSel and T.text or T.sub
+        ungroupBtn.TextColor3 = hasSel and T.text or T.sub
+        tbUndo.TextColor3 = (#HIST.undoStack > 0) and T.text or T.sub
+        tbRedo.TextColor3 = (#HIST.redoStack > 0) and T.text or T.sub
+    end
+
+    -- pintasan keyboard (PC): Alt+1..4 = Pilih / Geser / Skala / Putar
+    bind(UIS.InputBegan, function(input, processed)
+        if processed or not UIS:IsKeyDown(Enum.KeyCode.LeftAlt) then return end
+        local k = input.KeyCode
+        if k == Enum.KeyCode.One then TOOL.setMode("select")
+        elseif k == Enum.KeyCode.Two then TOOL.setMode("move")
+        elseif k == Enum.KeyCode.Three then TOOL.setMode("scale")
+        elseif k == Enum.KeyCode.Four then TOOL.setMode("rotate") end
+    end)
+    UI.stateColor, UI.pickSnap, UI.paintToolbar = stateColor, pickSnap, paintToolbar
+    end
+
     -- ===============================================================
     -- Halaman FILES
     -- ===============================================================
@@ -2751,15 +4835,20 @@ local function buildGui()
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(52, 28), TextSize = 11,
     })
 
-    -- baris chip filter + pilih
+    -- baris chip filter + menu pilih
     local chipRow = make("Frame", {
         Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 24), BackgroundTransparency = 1,
     }, PF)
+    local chipScroll = make("ScrollingFrame", {
+        Size = UDim2.new(1, -72, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0,
+        CanvasSize = UDim2.fromOffset(#KIND_LIST * 66, 0), ScrollingDirection = Enum.ScrollingDirection.X,
+    }, chipRow)
     local chips = {}
-    local chipDefs = { { "all", "Semua", 0, 60 }, { "rbxm", "RBXM", 64, 58 }, { "rbxmx", "RBXMX", 126, 62 } }
-    for _, d in ipairs(chipDefs) do
-        local b = button(chipRow, "", T.panel2, {
-            Position = UDim2.fromOffset(d[3], 0), Size = UDim2.fromOffset(d[4], 24), TextSize = 11,
+    local chipDefs = {}
+    for i, k in ipairs(KIND_LIST) do chipDefs[i] = { k, KIND_LABEL[k] } end
+    for i, d in ipairs(chipDefs) do
+        local b = button(chipScroll, "", T.panel2, {
+            Position = UDim2.fromOffset((i - 1) * 66, 0), Size = UDim2.fromOffset(62, 24), TextSize = 11,
         })
         chips[d[1]] = b
         bind(b.MouseButton1Click, function()
@@ -2768,11 +4857,8 @@ local function buildGui()
             E.saveSettings()
         end)
     end
-    local selAllBtn = button(chipRow, "Pilih semua", T.panel2, {
-        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -80, 0, 0), Size = UDim2.fromOffset(84, 24), TextSize = 11,
-    })
-    local selNoneBtn = button(chipRow, "Kosongkan", T.panel2, {
-        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(76, 24), TextSize = 11,
+    local selMenuBtn = button(chipRow, "Pilih", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(66, 24), TextSize = 11,
     })
 
     -- daftar file (virtual list: hanya baris yang terlihat yang dibuat)
@@ -2799,8 +4885,8 @@ local function buildGui()
         row.fill.Visible = sel and true or false
         row.name.Text = e.name
         row.dir.Text = (e.dir == "") and "(root)" or e.dir
-        row.badge.Text = (e.ext == "rbxm") and "RBXM" or "RBXMX"
-        row.badge.TextColor3 = (e.ext == "rbxm") and T.accent or T.purple
+        row.badge.Text = e.ext:upper()
+        row.badge.TextColor3 = KIND_COLOR[e.kind] or T.accent
         local st = S.status[e.path]
         if st == "ok" then
             row.state.Text, row.state.TextColor3 = "OK", T.okText
@@ -2887,7 +4973,7 @@ local function buildGui()
             if S.scanning then
                 emptyLbl.Text = "Memindai file..."
             elseif #S.entries == 0 then
-                emptyLbl.Text = "Belum ada file .rbxm / .rbxmx.\nTaruh di folder " .. CONFIG.Folder
+                emptyLbl.Text = "Belum ada file .rbxm .rbxmx .rbxl .png .jpg .mp3 .ogg.\nTaruh di folder " .. CONFIG.Folder
                     .. " lalu tekan Scan, atau ketik path file di kolom cari lalu Enter."
             else
                 emptyLbl.Text = "Tidak ada hasil untuk filter / pencarian ini."
@@ -2923,12 +5009,63 @@ local function buildGui()
         TextSize = 11, Visible = false,
     })
 
+    do
+    -- pratinjau gambar / audio di panel detail (hanya saat layout lebar)
+    local pvImg = make("ImageLabel", {
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -40), Size = UDim2.new(1, -20, 0, 80),
+        BackgroundColor3 = T.bg, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Fit, Visible = false,
+    }, detail)
+    corner(pvImg, 6)
+    local pvBtn = button(detail, "Putar", T.purple, {
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -40), Size = UDim2.new(1, -20, 0, 26),
+        TextSize = 11, Visible = false,
+    })
+    local pvEntry = nil
+    local function paintPreview(e)
+        pvEntry = e
+        local roomy = layout.wide and detail.AbsoluteSize.Y > 190
+        pvImg.Visible, pvBtn.Visible = false, false
+        if not e or not roomy then
+            stopPreview()
+            return
+        end
+        if e.kind == "image" then
+            local asset = localAsset(e)
+            if asset then
+                pvImg.Image = asset
+                pvImg.Visible = true
+            end
+        elseif e.kind == "audio" then
+            pvBtn.Visible = true
+            if not pv.sound then pvBtn.Text = "Putar" end
+        else
+            stopPreview()
+        end
+    end
+    bind(pvBtn.MouseButton1Click, function()
+        local e = pvEntry
+        if not e then return end
+        if pv.sound then
+            stopPreview()
+            return
+        end
+        local asset, err = localAsset(e)
+        if not asset then
+            setStatus(err or "aset lokal tidak tersedia", "err")
+            return
+        end
+        startPreview(asset, function(txt) pvBtn.Text = txt end)
+    end)
+    UI.paintPreview = paintPreview
+    end
+
     local function paintDetail()
         local e = S.focus
         if not e then
             nameLbl.Text = "Tidak ada file dipilih"
             metaLbl.Text = "Tap baris untuk mencentang & melihat detail."
             detailBtn.Visible = false
+            UI.paintPreview(nil)
             return
         end
         nameLbl.Text = e.name
@@ -2940,6 +5077,7 @@ local function buildGui()
             lines[1] = info.err
         else
             lines[1] = info.format .. " | " .. fmtBytes(info.size)
+            if info.w then lines[2] = info.w .. " x " .. info.h .. " px" end
             if info.objects then
                 lines[2] = info.objects .. " objek | " .. info.scripts .. " script"
                 lines[3] = "Root: " .. info.rootClass .. " \"" .. info.rootName .. "\""
@@ -2959,6 +5097,7 @@ local function buildGui()
         end
         metaLbl.Text = table.concat(lines, layout.wide and "\n" or " | ")
         detailBtn.Visible = layout.wide and not S.busy
+        UI.paintPreview(e)
         if layout.compact and not S.busy then
             setStatus(e.name .. " | " .. table.concat(lines, " | "), "info")
         end
@@ -3077,8 +5216,14 @@ local function buildGui()
         end)
     end)
     bind(scanBtn.MouseButton1Click, function() E.rescan(false) end)
-    bind(selAllBtn.MouseButton1Click, E.selectView)
-    bind(selNoneBtn.MouseButton1Click, E.clearSel)
+    bind(selMenuBtn.MouseButton1Click, function()
+        dropdown(selMenuBtn, {
+            { text = "Pilih semua (hasil filter)", value = "all" },
+            { text = "Kosongkan pilihan", value = "none" },
+        }, nil, function(v)
+            if v == "all" then E.selectView() else E.clearSel() end
+        end)
+    end)
 
     bind(targetBtn.MouseButton1Click, function()
         if S.busy then return end
@@ -3403,6 +5548,827 @@ local function buildGui()
     end)
 
 
+    do
+    local stateColor, pickSnap = UI.stateColor, UI.pickSnap
+    -- ===============================================================
+    -- Halaman STUDIO (seleksi Studio Lite, properti, struktur, transform, riwayat)
+    -- ===============================================================
+    local stScroll = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 1, -12), BackgroundTransparency = 1,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, PST)
+    make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, stScroll)
+    make("UIPadding", { PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 8) }, stScroll)
+
+    local stOrder = 0
+    local function stCard(title, height)
+        stOrder = stOrder + 1
+        local f = make("Frame", {
+            Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = stOrder,
+        }, stScroll)
+        corner(f, 8)
+        label(f, {
+            Text = string.upper(title), Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -20, 0, 14),
+            Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = T.sub,
+        })
+        return f
+    end
+    -- tombol grid n kolom di dalam card
+    local function gridBtn(parent, text, col, cols, y, fn, color)
+        local b = button(parent, text, color or T.panel2, {
+            Position = UDim2.new((col - 1) / cols, (col == 1) and 10 or 3, 0, y),
+            Size = UDim2.new(1 / cols, (col == 1 or col == cols) and -13 or -6, 0, 26), TextSize = 11,
+        })
+        if fn then bind(b.MouseButton1Click, fn) end
+        return b
+    end
+
+    -- 1) Seleksi
+    local cardSel = stCard("Seleksi (terhubung ke Studio Lite)", 190)
+    local selSummary = label(cardSel, {
+        Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -20, 0, 14), TextSize = 11, TextColor3 = T.text,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local selList = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(10, 40), Size = UDim2.new(1, -20, 0, 70), BackgroundColor3 = T.bg,
+        BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, cardSel)
+    corner(selList, 6)
+    make("UIListLayout", { Padding = UDim.new(0, 1), SortOrder = Enum.SortOrder.LayoutOrder }, selList)
+    gridBtn(cardSel, "Ambil dari Studio", 1, 3, 116, function() task.spawn(function() SEL.retryHook() end) end)
+    gridBtn(cardSel, "Target import", 2, 3, 116, function() task.spawn(OPS.selectTarget) end)
+    gridBtn(cardSel, "Hasil import", 3, 3, 116, function() task.spawn(OPS.selectLastImport) end)
+    gridBtn(cardSel, "Pilih anak", 1, 3, 148, function() task.spawn(OPS.selectChildren) end)
+    gridBtn(cardSel, "Kosongkan", 2, 3, 148, function() task.spawn(OPS.clearSelection) end)
+    gridBtn(cardSel, "Muat ulang", 3, 3, 148, function() task.spawn(function() SEL.refresh() fire("selection2") end) end)
+
+    local selRows = {}
+    local function paintSelection()
+        for _, r in ipairs(selRows) do r:Destroy() end
+        selRows = {}
+        local list = SEL.list
+        local counts, order = {}, {}
+        for _, i in ipairs(list) do
+            if not counts[i.ClassName] then
+                counts[i.ClassName] = 0
+                order[#order + 1] = i.ClassName
+            end
+            counts[i.ClassName] = counts[i.ClassName] + 1
+        end
+        table.sort(order, function(a, b) return counts[a] > counts[b] end)
+        local parts = {}
+        for k, c in ipairs(order) do
+            if k > 3 then parts[#parts + 1] = "..." break end
+            parts[#parts + 1] = c .. " x" .. counts[c]
+        end
+        local src = (SEL.mode == "studio") and "hook Studio Lite" or "internal"
+        selSummary.Text = (#list == 0) and ("Tidak ada seleksi  |  sumber: " .. src)
+            or (#list .. " objek (" .. table.concat(parts, ", ") .. ")  |  " .. src)
+        for k, inst in ipairs(list) do
+            if k > 40 then break end
+            local row = make("Frame", { Size = UDim2.new(1, -4, 0, 20), BackgroundTransparency = 1, LayoutOrder = k }, selList)
+            selRows[#selRows + 1] = row
+            label(row, {
+                Text = inst.Name .. "   " .. inst.ClassName, Position = UDim2.fromOffset(6, 0), Size = UDim2.new(1, -30, 1, 0),
+                TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd,
+            })
+            local x = make("TextButton", {
+                Text = "x", Size = UDim2.fromOffset(20, 20), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+                BackgroundTransparency = 1, TextColor3 = T.sub, Font = Enum.Font.GothamBold, TextSize = 12, BorderSizePixel = 0,
+            }, row)
+            bind(x.MouseButton1Click, function()
+                local rest = {}
+                for _, o in ipairs(SEL.list) do
+                    if o ~= inst then rest[#rest + 1] = o end
+                end
+                task.spawn(SEL.set, rest)
+            end)
+        end
+    end
+
+    -- 2) Properti cepat (tri-state)
+    local cardProp = stCard("Properti part", 100)
+    local propBtns = {}
+    local propDefs = { { "Anchored", "Anchored" }, { "CanCollide", "CanCollide" }, { "CanTouch", "CanTouch" }, { "CanQuery", "CanQuery" } }
+    for i, d in ipairs(propDefs) do
+        local col, row = ((i - 1) % 2) + 1, math.floor((i - 1) / 2)
+        propBtns[d[1]] = gridBtn(cardProp, d[2], col, 2, 22 + row * 30, function() task.spawn(OPS.setBool, d[1], "toggle") end)
+    end
+    local descBtn = gridBtn(cardProp, "", 1, 1, 70, function()
+        CONFIG.OpDescendants = not CONFIG.OpDescendants
+        E.saveSettings()
+        fire("selection2")
+        if H.settingsRefresh then H.settingsRefresh() end
+    end)
+
+    -- 3) Struktur
+    local cardStruct = stCard("Struktur", 100)
+    gridBtn(cardStruct, "Group", 1, 3, 22, function() task.spawn(OPS.group) end)
+    gridBtn(cardStruct, "Ungroup", 2, 3, 22, function() task.spawn(OPS.ungroup) end)
+    gridBtn(cardStruct, "Duplikat", 3, 3, 22, function() task.spawn(OPS.duplicate) end)
+    gridBtn(cardStruct, "Hapus", 1, 3, 54, function() task.spawn(OPS.delete) end, Color3.fromRGB(150, 60, 60))
+    gridBtn(cardStruct, "Freeze (anchor)", 2, 3, 54, function() task.spawn(OPS.freezeSel) end)
+    gridBtn(cardStruct, "Lepas anchor asli", 3, 3, 54, function() task.spawn(OPS.restoreAnchors) end)
+
+    -- 4) Transform
+    local cardXf = stCard("Transform", 236)
+    local xfModeBtns = {}
+    for i, m in ipairs(TOOL.MODES) do
+        xfModeBtns[m] = gridBtn(cardXf, TOOL.MODE_LABEL[m], i, 4, 22, function() TOOL.setMode(m) end)
+    end
+    local xfSpace = gridBtn(cardXf, "", 1, 3, 54, function() TOOL.setSpace(TOOL.space == "global" and "local" or "global") end)
+    local xfUniform = gridBtn(cardXf, "", 2, 3, 54, function()
+        CONFIG.UniformScale = not CONFIG.UniformScale
+        E.saveSettings()
+        fire("tool")
+        if H.settingsRefresh then H.settingsRefresh() end
+    end)
+    local xfInvert = gridBtn(cardXf, "", 3, 3, 54, function()
+        CONFIG.RotateInvert = not CONFIG.RotateInvert
+        E.saveSettings()
+        fire("tool")
+        if H.settingsRefresh then H.settingsRefresh() end
+    end)
+    local xfSnapMove, xfSnapRot, xfSnapScale
+    xfSnapMove = gridBtn(cardXf, "", 1, 3, 86, function() pickSnap(xfSnapMove, "move") end)
+    xfSnapRot = gridBtn(cardXf, "", 2, 3, 86, function() pickSnap(xfSnapRot, "rot") end)
+    xfSnapScale = gridBtn(cardXf, "", 3, 3, 86, function() pickSnap(xfSnapScale, "scale") end)
+
+    local focusedBox = nil
+    local function numRow(title, y)
+        if title ~= "" then
+            label(cardXf, { Text = title, Position = UDim2.fromOffset(10, y), Size = UDim2.fromOffset(52, 26), TextSize = 11, TextColor3 = T.sub })
+        end
+        local boxes = {}
+        for i = 1, 3 do
+            local b = make("TextBox", {
+                Position = UDim2.new((i - 1) / 3, 62 - (i - 1) * 24, 0, y), Size = UDim2.new(1 / 3, -27, 0, 26),
+                BackgroundColor3 = T.panel2, BorderSizePixel = 0, Text = "", PlaceholderText = "-", PlaceholderColor3 = T.sub,
+                TextColor3 = T.text, Font = Enum.Font.Gotham, TextSize = 11, ClearTextOnFocus = false,
+            }, cardXf)
+            corner(b, 5)
+            boxes[i] = b
+        end
+        return boxes
+    end
+    local posBoxes = numRow("Posisi", 120)
+    local rotBoxes = numRow("Rotasi", 150)
+    local sizeLbl = label(cardXf, { Text = "Ukuran", Position = UDim2.fromOffset(10, 180), Size = UDim2.fromOffset(52, 26), TextSize = 11, TextColor3 = T.sub })
+    local sizeBoxes = numRow("", 180)
+    label(cardXf, {
+        Text = "Isi angka lalu tap di luar kotak untuk menerapkan. Model memakai skala seragam (kotak 1).",
+        Position = UDim2.fromOffset(10, 210), Size = UDim2.new(1, -20, 0, 22), TextSize = 10, TextColor3 = T.sub, TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top,
+    })
+
+    local function fmt(n) return string.format("%.2f", n):gsub("%.?0+$", "") end
+    local function paintFields()
+        if focusedBox then return end
+        local items = xformItems(SEL.list)
+        local function blank(boxes) for _, b in ipairs(boxes) do b.Text = "" end end
+        if #items == 0 then
+            blank(posBoxes) blank(rotBoxes) blank(sizeBoxes)
+            sizeLbl.Text = "Ukuran"
+            return
+        end
+        local center = aabbOf(items)
+        if center then
+            posBoxes[1].Text, posBoxes[2].Text, posBoxes[3].Text = fmt(center.X), fmt(center.Y), fmt(center.Z)
+        end
+        if #items == 1 then
+            local pv = pivotOf(items[1])
+            if pv then
+                local rx, ry, rz = pv:ToOrientation()
+                rotBoxes[1].Text, rotBoxes[2].Text, rotBoxes[3].Text = fmt(math.deg(rx)), fmt(math.deg(ry)), fmt(math.deg(rz))
+            end
+            local it = items[1]
+            if it:IsA("BasePart") then
+                sizeLbl.Text = "Ukuran"
+                sizeBoxes[1].Text, sizeBoxes[2].Text, sizeBoxes[3].Text = fmt(it.Size.X), fmt(it.Size.Y), fmt(it.Size.Z)
+            else
+                sizeLbl.Text = "Skala"
+                local ok, sc = pcall(function() return it:GetScale() end)
+                sizeBoxes[1].Text = ok and fmt(sc) or ""
+                sizeBoxes[2].Text, sizeBoxes[3].Text = "", ""
+            end
+        else
+            blank(rotBoxes) blank(sizeBoxes)
+            sizeLbl.Text = "Ukuran"
+        end
+    end
+
+    local function readVec(boxes)
+        local a, b, c = tonumber(boxes[1].Text), tonumber(boxes[2].Text), tonumber(boxes[3].Text)
+        if a and b and c then return Vector3.new(a, b, c) end
+        return nil
+    end
+    local function wireBoxes(boxes, commit)
+        for _, b in ipairs(boxes) do
+            bind(b.Focused, function() focusedBox = b end)
+            bind(b.FocusLost, function()
+                focusedBox = nil
+                task.spawn(function()
+                    local ok, err = pcall(commit)
+                    if not ok then logLine("Transform numerik: " .. tostring(err), "err") end
+                    paintFields()
+                end)
+            end)
+        end
+    end
+    wireBoxes(posBoxes, function()
+        local v = readVec(posBoxes)
+        if v then OPS.setPosition(v) end
+    end)
+    wireBoxes(rotBoxes, function()
+        local v = readVec(rotBoxes)
+        if v then OPS.setRotation(v) end
+    end)
+    wireBoxes(sizeBoxes, function()
+        local items = xformItems(SEL.list)
+        if #items ~= 1 then return end
+        if items[1]:IsA("BasePart") then
+            local v = readVec(sizeBoxes)
+            if v then OPS.setSize(v) end
+        else
+            local n = tonumber(sizeBoxes[1].Text)
+            if n then OPS.setSize(n) end
+        end
+    end)
+
+    -- 5) Riwayat
+    local cardHist = stCard("Riwayat aksi", 126)
+    local histLbl = label(cardHist, {
+        Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -20, 0, 60), TextSize = 11, TextColor3 = T.sub,
+        TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+    })
+    gridBtn(cardHist, "Undo", 1, 2, 90, function() task.spawn(HIST.undo) end)
+    gridBtn(cardHist, "Redo", 2, 2, 90, function() task.spawn(HIST.redo) end)
+
+    local function paintStudio()
+        paintSelection()
+        for prop, b in pairs(propBtns) do
+            local st = OPS.stateOf(prop)
+            local txt = (st == "on") and "ON" or (st == "off") and "OFF" or (st == "mixed") and "CAMPUR" or "-"
+            b.Text = prop .. ": " .. txt
+            stateColor(b, st)
+        end
+        descBtn.Text = "Sertakan turunan: " .. (CONFIG.OpDescendants and "YA" or "TIDAK")
+        descBtn.BackgroundColor3 = CONFIG.OpDescendants and T.accent or T.panel2
+        descBtn.TextColor3 = CONFIG.OpDescendants and T.white or T.text
+        for m, b in pairs(xfModeBtns) do
+            b.BackgroundColor3 = (TOOL.mode == m) and T.accent or T.panel2
+            b.TextColor3 = (TOOL.mode == m) and T.white or T.text
+        end
+        xfSpace.Text = "Ruang: " .. ((TOOL.space == "global") and "Global" or "Lokal")
+        xfUniform.Text = "Seragam: " .. (CONFIG.UniformScale and "YA" or "TIDAK")
+        xfUniform.BackgroundColor3 = CONFIG.UniformScale and T.accent or T.panel2
+        xfInvert.Text = "Balik putar: " .. (CONFIG.RotateInvert and "YA" or "TIDAK")
+        xfInvert.BackgroundColor3 = CONFIG.RotateInvert and T.accent or T.panel2
+        xfSnapMove.Text = "Geser " .. TOOL.snapText("move")
+        xfSnapRot.Text = "Putar " .. TOOL.snapText("rot")
+        xfSnapScale.Text = "Skala " .. TOOL.snapText("scale")
+        local lines = {}
+        for i = #HIST.undoStack, math.max(1, #HIST.undoStack - 3), -1 do
+            lines[#lines + 1] = (#lines == 0 and "> " or "  ") .. HIST.undoStack[i].name
+        end
+        histLbl.Text = (#lines == 0) and "Belum ada aksi." or table.concat(lines, "\n")
+        paintFields()
+    end
+    UI.paintStudio = paintStudio
+    end
+
+    do
+    -- ===============================================================
+    -- Halaman TOOLBOX (cari & insert aset Roblox)
+    -- ===============================================================
+    local tbs = {
+        cat = TB.CATS[1], sortIdx = 1, query = "", view = "results", items = {}, cursor = nil, page = 0,
+        more = false, sel = nil, loading = false, err = nil, token = 0, started = false, lastTap = 0, lastTapId = nil,
+    }
+    local tRow1 = make("Frame", { Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 28), BackgroundTransparency = 1 }, PT)
+    local tSbox = make("Frame", { Size = UDim2.new(1, -90, 1, 0), BackgroundColor3 = T.panel2, BorderSizePixel = 0 }, tRow1)
+    corner(tSbox, 6)
+    local tSstroke = stroke(tSbox, T.line, 1)
+    local tSearch = make("TextBox", {
+        Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0), BackgroundTransparency = 1, Text = "",
+        PlaceholderText = "Cari di Toolbox (Enter)...", PlaceholderColor3 = T.sub, TextColor3 = T.text,
+        Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
+        BorderSizePixel = 0,
+    }, tSbox)
+    local tSortBtn = button(tRow1, "", T.panel2, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(82, 28), TextSize = 11,
+    })
+
+    local tChipRow = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 24), BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 0, CanvasSize = UDim2.fromOffset(372, 0), ScrollingDirection = Enum.ScrollingDirection.X,
+    }, PT)
+    local catChips, viewChips = {}, {}
+    for i, c in ipairs(TB.CATS) do
+        local b = button(tChipRow, c.label, T.panel2, { Position = UDim2.fromOffset((i - 1) * 60, 0), Size = UDim2.fromOffset(56, 24), TextSize = 11 })
+        catChips[c.id] = b
+        bind(b.MouseButton1Click, function()
+            tbs.cat = c
+            tbs.view = "results"
+            H.toolboxRefresh(true)
+        end)
+    end
+    local viewDefs = { { "results", "Hasil" }, { "favs", "Favorit" }, { "recent", "Terakhir" } }
+    for i, d in ipairs(viewDefs) do
+        local b = button(tChipRow, d[2], T.panel2, { Position = UDim2.fromOffset(186 + (i - 1) * 62, 0), Size = UDim2.fromOffset(58, 24), TextSize = 11 })
+        viewChips[d[1]] = b
+        bind(b.MouseButton1Click, function()
+            tbs.view = d[1]
+            H.toolboxRefresh(d[1] == "results" and not tbs.started)
+        end)
+    end
+
+    local tIdRow = make("Frame", { Position = UDim2.fromOffset(8, 66), Size = UDim2.new(1, -16, 0, 26), BackgroundTransparency = 1 }, PT)
+    local tIdBox = make("Frame", { Size = UDim2.new(1, -78, 1, 0), BackgroundColor3 = T.panel2, BorderSizePixel = 0 }, tIdRow)
+    corner(tIdBox, 6)
+    local tIdInput = make("TextBox", {
+        Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0), BackgroundTransparency = 1, Text = "",
+        PlaceholderText = "Insert langsung dengan ID / link aset", PlaceholderColor3 = T.sub, TextColor3 = T.text,
+        Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
+        BorderSizePixel = 0,
+    }, tIdBox)
+    local tIdBtn = button(tIdRow, "Insert ID", T.ok, {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(72, 26), TextSize = 11,
+    })
+
+    local tGrid = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 96), Size = UDim2.new(1, -16, 1, -(96 + 92)), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, PT)
+    corner(tGrid, 8)
+    local tGridLayout = make("UIGridLayout", {
+        CellPadding = UDim2.fromOffset(6, 6), CellSize = UDim2.fromOffset(100, 130), SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    }, tGrid)
+    make("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6), PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4) }, tGrid)
+    local tEmpty = label(tGrid, {
+        Position = UDim2.fromOffset(12, 12), Size = UDim2.new(1, -24, 0, 70), TextWrapped = true, TextColor3 = T.sub,
+        TextYAlignment = Enum.TextYAlignment.Top, TextSize = 11, Text = "", LayoutOrder = -1,
+    })
+    tEmpty.Parent = PT
+    tEmpty.Position = UDim2.fromOffset(24, 110)
+    tEmpty.Size = UDim2.new(1, -48, 0, 70)
+
+    local function relayoutGrid()
+        local w = tGrid.AbsoluteSize.X - 12
+        local cols = math.max(2, math.floor(w / 104))
+        local cw = math.floor((w - (cols - 1) * 6) / cols)
+        tGridLayout.CellSize = UDim2.fromOffset(cw, cw + 34)
+    end
+    bind(tGrid:GetPropertyChangedSignal("AbsoluteSize"), relayoutGrid)
+
+    -- drawer detail (bawah)
+    local tDrawer = make("Frame", {
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -4), Size = UDim2.new(1, -16, 0, 84),
+        BackgroundColor3 = T.panel, BorderSizePixel = 0,
+    }, PT)
+    corner(tDrawer, 8)
+    local dThumb = make("ImageLabel", {
+        Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(68, 68), BackgroundColor3 = T.bg, BorderSizePixel = 0,
+        ScaleType = Enum.ScaleType.Fit,
+    }, tDrawer)
+    corner(dThumb, 6)
+    local dName = label(tDrawer, {
+        Position = UDim2.fromOffset(84, 6), Size = UDim2.new(1, -92, 0, 16), Font = Enum.Font.GothamBold, TextSize = 12,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local dMeta = label(tDrawer, {
+        Position = UDim2.fromOffset(84, 23), Size = UDim2.new(1, -92, 0, 14), TextSize = 10, TextColor3 = T.sub,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local dInsert = button(tDrawer, "Insert", T.ok, { Position = UDim2.fromOffset(84, 46), Size = UDim2.new(0, 70, 0, 28), TextSize = 12, Font = Enum.Font.GothamBold })
+    local dFav = button(tDrawer, "Favorit", T.panel2, { Position = UDim2.fromOffset(158, 46), Size = UDim2.new(0, 62, 0, 28), TextSize = 11 })
+    local dCopy = button(tDrawer, "Salin ID", T.panel2, { Position = UDim2.fromOffset(224, 46), Size = UDim2.new(0, 62, 0, 28), TextSize = 11 })
+    local dPlay = button(tDrawer, "Putar", T.purple, { Position = UDim2.fromOffset(290, 46), Size = UDim2.new(0, 56, 0, 28), TextSize = 11, Visible = false })
+
+    local cards = {}
+    local function currentList()
+        if tbs.view == "favs" then return TB.favs end
+        if tbs.view == "recent" then return TB.recent end
+        return tbs.items
+    end
+
+    local function paintDrawer()
+        local it = tbs.sel
+        dInsert.Visible, dFav.Visible, dCopy.Visible = it ~= nil, it ~= nil, it ~= nil
+        dPlay.Visible = it ~= nil and it.kind == "audio"
+        if not it then
+            dThumb.Image = ""
+            dName.Text = "Pilih aset untuk melihat detail"
+            dMeta.Text = tbs.loading and "Memuat..." or (tbs.err and ("Gagal: " .. tbs.err) or "Ketuk dua kali = insert cepat")
+            return
+        end
+        dThumb.Image = (it.kind == "audio") and "" or string.format("rbxthumb://type=Asset&id=%d&w=150&h=150", it.id)
+        dName.Text = it.name
+        dMeta.Text = string.format("%s%d  |  %s", it.creator and (it.creator .. "  |  ID ") or "ID ", it.id, it.kind)
+        dFav.Text = TB.isFav(it.id) and "Hapus fav" or "Favorit"
+        dInsert.Text = TB.busy and "..." or "Insert"
+        dInsert.BackgroundColor3 = TB.busy and T.panel2 or T.ok
+    end
+
+    local function paintCards()
+        for id, c in pairs(cards) do
+            local on = tbs.sel and tbs.sel.id == id
+            c.stroke.Transparency = on and 0 or 1
+        end
+    end
+
+    local function addCard(it, order)
+        local f = make("TextButton", {
+            Text = "", AutoButtonColor = false, BackgroundColor3 = T.row, BorderSizePixel = 0, LayoutOrder = order,
+        }, tGrid)
+        corner(f, 8)
+        local st = stroke(f, T.accent, 1.5, 1)
+        local img = make("ImageLabel", {
+            Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 1, -38), BackgroundColor3 = T.bg, BorderSizePixel = 0,
+            ScaleType = Enum.ScaleType.Fit,
+            Image = (it.kind == "audio") and "" or string.format("rbxthumb://type=Asset&id=%d&w=150&h=150", it.id),
+        }, f)
+        corner(img, 6)
+        if it.kind == "audio" then
+            label(img, { Size = UDim2.fromScale(1, 1), Text = "AUDIO", TextXAlignment = Enum.TextXAlignment.Center,
+                Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = T.purple })
+        end
+        label(f, {
+            Position = UDim2.new(0, 6, 1, -32), Size = UDim2.new(1, -12, 0, 28), Text = it.name, TextSize = 10,
+            TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextTruncate = Enum.TextTruncate.AtEnd,
+        })
+        if TB.isFav(it.id) then
+            label(f, { Position = UDim2.fromOffset(8, 6), Size = UDim2.fromOffset(16, 16), Text = "*", TextColor3 = T.warn,
+                Font = Enum.Font.GothamBold, TextSize = 16 })
+        end
+        cards[it.id] = { frame = f, stroke = st }
+        bind(f.MouseButton1Click, function()
+            local now = os.clock()
+            if tbs.lastTapId == it.id and now - tbs.lastTap < 0.45 then
+                tbs.lastTapId = nil
+                E.insertAsset(it)
+                return
+            end
+            tbs.lastTapId, tbs.lastTap = it.id, now
+            tbs.sel = it
+            paintCards()
+            paintDrawer()
+        end)
+        return f
+    end
+
+    local moreBtn = nil
+    local function renderCards()
+        for _, c in pairs(cards) do c.frame:Destroy() end
+        cards = {}
+        if moreBtn then moreBtn:Destroy() moreBtn = nil end
+        local list = currentList()
+        for i, it in ipairs(list) do addCard(it, i) end
+        if tbs.view == "results" and tbs.more and #list > 0 then
+            moreBtn = button(tGrid, "Muat lagi", T.panel2, { LayoutOrder = #list + 1, TextSize = 12 })
+            bind(moreBtn.MouseButton1Click, function() H.toolboxRefresh(false, true) end)
+        end
+        if #list == 0 then
+            if tbs.loading then
+                tEmpty.Text = "Memuat..."
+            elseif tbs.view == "favs" then
+                tEmpty.Text = "Belum ada favorit. Pilih aset lalu tekan Favorit."
+            elseif tbs.view == "recent" then
+                tEmpty.Text = "Belum ada aset yang diinsert."
+            elseif tbs.err then
+                tEmpty.Text = "Toolbox tidak bisa dimuat (" .. tbs.err .. ").\nExecutor harus punya request/http_request. Kamu tetap bisa insert lewat kotak ID di atas."
+            else
+                tEmpty.Text = "Tidak ada hasil."
+            end
+            tEmpty.Visible = true
+        else
+            tEmpty.Visible = false
+        end
+        paintCards()
+        paintDrawer()
+    end
+
+    local function paintToolboxBar()
+        for id, b in pairs(catChips) do
+            local on = tbs.cat.id == id
+            b.BackgroundColor3 = on and T.accent or T.panel2
+            b.TextColor3 = on and T.white or T.sub
+        end
+        for id, b in pairs(viewChips) do
+            local on = tbs.view == id
+            b.BackgroundColor3 = on and T.accent or T.panel2
+            b.TextColor3 = on and T.white or T.sub
+        end
+        tSortBtn.Text = TB.SORTS[tbs.sortIdx].label
+    end
+
+    -- reset = pencarian baru; more = halaman berikutnya
+    function H.toolboxRefresh(reset, more)
+        paintToolboxBar()
+        if tbs.view ~= "results" then
+            renderCards()
+            return
+        end
+        if reset then
+            tbs.items, tbs.cursor, tbs.page, tbs.more, tbs.err, tbs.sel = {}, nil, 0, false, nil, nil
+        elseif not more then
+            renderCards()
+            return
+        end
+        if tbs.loading then return end
+        tbs.started = true
+        tbs.loading = true
+        tbs.token = tbs.token + 1
+        local tok = tbs.token
+        renderCards()
+        task.spawn(function()
+            local items, nextCursor, err = TB.search(tbs.cat, tbs.query, TB.SORTS[tbs.sortIdx].v, tbs.cursor, tbs.page)
+            if tok ~= tbs.token or not alive() then return end
+            tbs.loading = false
+            if not items then
+                tbs.err = tostring(err)
+                renderCards()
+                return
+            end
+            local have = {}
+            for _, it in ipairs(tbs.items) do have[it.id] = true end
+            for _, it in ipairs(items) do
+                if not have[it.id] then tbs.items[#tbs.items + 1] = it end
+            end
+            tbs.cursor = nextCursor
+            tbs.page = tbs.page + 1
+            tbs.more = (nextCursor ~= nil) or (#items >= CONFIG.ToolboxPageSize)
+            renderCards()
+        end)
+    end
+
+    bind(tSearch.Focused, function() tween(tSstroke, 0.12, { Color = T.accent }) end)
+    bind(tSearch.FocusLost, function(enter)
+        tween(tSstroke, 0.12, { Color = T.line })
+        if enter then
+            tbs.query = tSearch.Text
+            tbs.view = "results"
+            tbs.loading = false
+            H.toolboxRefresh(true)
+        end
+    end)
+    bind(tSortBtn.MouseButton1Click, function()
+        local opts = {}
+        for i, s in ipairs(TB.SORTS) do opts[#opts + 1] = { text = s.label, value = i } end
+        dropdown(tSortBtn, opts, tbs.sortIdx, function(v)
+            tbs.sortIdx = v
+            tbs.view = "results"
+            tbs.loading = false
+            H.toolboxRefresh(true)
+        end)
+    end)
+    bind(tIdBtn.MouseButton1Click, function()
+        local id = TB.parseId(tIdInput.Text)
+        if not id then setStatus("Isi ID aset (angka) atau link aset.", "warn") return end
+        E.insertAsset({ id = id, kind = tbs.cat.id, name = "Asset " .. id })
+    end)
+    bind(tIdInput.FocusLost, function(enter)
+        if enter then
+            local id = TB.parseId(tIdInput.Text)
+            if id then E.insertAsset({ id = id, kind = tbs.cat.id, name = "Asset " .. id }) end
+        end
+    end)
+    bind(dInsert.MouseButton1Click, function()
+        if tbs.sel and not TB.busy then E.insertAsset(tbs.sel) end
+    end)
+    bind(dFav.MouseButton1Click, function()
+        if not tbs.sel then return end
+        local on = TB.toggleFav(tbs.sel)
+        setStatus(on and "Ditambahkan ke favorit." or "Dihapus dari favorit.", "info")
+        renderCards()
+    end)
+    bind(dCopy.MouseButton1Click, function()
+        local clip = setclipboard or toclipboard
+        if tbs.sel and clip and pcall(clip, tostring(tbs.sel.id)) then
+            setStatus("ID disalin: " .. tbs.sel.id, "ok")
+        else
+            setStatus("Executor tidak punya setclipboard.", "err")
+        end
+    end)
+    bind(dPlay.MouseButton1Click, function()
+        local it = tbs.sel
+        if not it then return end
+        if pv.sound then
+            stopPreview()
+            return
+        end
+        startPreview("rbxassetid://" .. it.id, function(txt) dPlay.Text = txt end)
+    end)
+    bind(PT:GetPropertyChangedSignal("Visible"), function()
+        if not PT.Visible then
+            tEmpty.Visible = false
+        else
+            renderCards()
+        end
+    end)
+    onTab.toolbox = function()
+        relayoutGrid()
+        if not tbs.started and tbs.view == "results" then
+            H.toolboxRefresh(true)
+        else
+            renderCards()
+        end
+    end
+    UI.paintDrawer = paintDrawer
+    end
+
+    do
+    -- ===============================================================
+    -- Halaman PLUGIN
+    -- ===============================================================
+    local pgTool = make("Frame", { Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 28), BackgroundTransparency = 1 }, PP)
+    local pgScan = button(pgTool, "Scan", T.purple, { Size = UDim2.fromOffset(56, 28), TextSize = 11 })
+    local pgSample = button(pgTool, "Buat contoh", T.panel2, { Position = UDim2.fromOffset(62, 0), Size = UDim2.fromOffset(88, 28), TextSize = 11 })
+    local pgPaste = button(pgTool, "Tempel kode", T.panel2, { Position = UDim2.fromOffset(156, 0), Size = UDim2.fromOffset(88, 28), TextSize = 11 })
+    local pgInfo = label(PP, {
+        Position = UDim2.fromOffset(10, 38), Size = UDim2.new(1, -20, 0, 26), TextSize = 10, TextColor3 = T.sub,
+        TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+        Text = "Folder: " .. PLG.dir .. "  |  plugin = kode Lua dengan API SL, berjalan dengan hak executor penuh. Aktifkan hanya yang kamu percaya.",
+    })
+    local pgList = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 68), Size = UDim2.new(1, -16, 1, -76), BackgroundColor3 = T.panel,
+        BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, PP)
+    corner(pgList, 8)
+    make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, pgList)
+    make("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, pgList)
+    local pgEmpty = label(pgList, {
+        Size = UDim2.new(1, 0, 0, 60), TextWrapped = true, TextColor3 = T.sub, TextSize = 11, TextYAlignment = Enum.TextYAlignment.Top,
+        Text = "Belum ada plugin. Tekan \"Buat contoh\" untuk membuat 2 plugin contoh, atau \"Tempel kode\" untuk menyimpan plugin sendiri.",
+        LayoutOrder = 999,
+    })
+
+    -- panel tempel kode
+    local pasteFrame = make("Frame", {
+        Position = UDim2.fromOffset(8, 68), Size = UDim2.new(1, -16, 0, 214), BackgroundColor3 = T.panel2, BorderSizePixel = 0,
+        Visible = false, ZIndex = 5,
+    }, PP)
+    corner(pasteFrame, 8)
+    stroke(pasteFrame, T.accent, 1)
+    local pasteName = make("TextBox", {
+        Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 26), BackgroundColor3 = T.bg, BorderSizePixel = 0,
+        Text = "", PlaceholderText = "Nama file (mis. plugin_saya)", PlaceholderColor3 = T.sub, TextColor3 = T.text,
+        Font = Enum.Font.Gotham, TextSize = 12, ClearTextOnFocus = false, ZIndex = 6,
+    }, pasteFrame)
+    corner(pasteName, 5)
+    local pasteCode = make("TextBox", {
+        Position = UDim2.fromOffset(8, 40), Size = UDim2.new(1, -16, 0, 130), BackgroundColor3 = T.bg, BorderSizePixel = 0,
+        Text = "", PlaceholderText = "Tempel kode plugin di sini", PlaceholderColor3 = T.sub, TextColor3 = T.text,
+        Font = Enum.Font.Code, TextSize = 11, ClearTextOnFocus = false, MultiLine = true, TextWrapped = false,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 6,
+    }, pasteFrame)
+    corner(pasteCode, 5)
+    local pasteSave = button(pasteFrame, "Simpan", T.ok, { Position = UDim2.new(0, 8, 1, -36), Size = UDim2.new(0.5, -12, 0, 28), TextSize = 12, ZIndex = 6 })
+    local pasteCancel = button(pasteFrame, "Tutup", T.panel, { Position = UDim2.new(0.5, 4, 1, -36), Size = UDim2.new(0.5, -12, 0, 28), TextSize = 12, ZIndex = 6 })
+
+    local pCards = {}
+    local confirmKey, confirmAt = nil, 0
+
+    local function paintPluginCard(p)
+        local c = pCards[p.key]
+        if not c then return end
+        c.name.Text = (p.meta and p.meta.name or p.key) .. ((p.meta and p.meta.version ~= "") and ("  v" .. p.meta.version) or "")
+        local info = {}
+        if p.meta and p.meta.author ~= "" then info[#info + 1] = "oleh " .. p.meta.author end
+        if p.meta and p.meta.desc ~= "" then info[#info + 1] = p.meta.desc end
+        info[#info + 1] = p.key
+        c.meta.Text = table.concat(info, "  |  ")
+        local on = p.loaded
+        c.toggle.Text = on and "Matikan" or "Aktifkan"
+        c.toggle.BackgroundColor3 = on and Color3.fromRGB(150, 70, 60) or T.ok
+        c.reload.Visible = on
+        if p.err then
+            c.err.Text = "Error: " .. tostring(p.err):sub(1, 140)
+            c.err.Visible = true
+        else
+            c.err.Visible = false
+        end
+    end
+
+    local function buildPluginCard(p, order)
+        local card = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = T.row,
+            BorderSizePixel = 0, LayoutOrder = order,
+        }, pgList)
+        corner(card, 8)
+        make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, card)
+        make("UIPadding", { PaddingBottom = UDim.new(0, 8) }, card)
+        local head = make("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, LayoutOrder = 1 }, card)
+        local c = { card = card }
+        c.name = label(head, { Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -150, 0, 16), Font = Enum.Font.GothamBold, TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd })
+        c.meta = label(head, { Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -150, 0, 20), TextSize = 10, TextColor3 = T.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top })
+        c.toggle = button(head, "Aktifkan", T.ok, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(76, 28), TextSize = 11 })
+        c.reload = button(head, "Reload", T.panel2, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -90, 0.5, 0), Size = UDim2.fromOffset(52, 28), TextSize = 11, Visible = false })
+        c.err = label(card, { Size = UDim2.new(1, -20, 0, 28), Position = UDim2.fromOffset(10, 0), TextSize = 10, TextColor3 = T.err, TextWrapped = true,
+            TextYAlignment = Enum.TextYAlignment.Top, Visible = false, LayoutOrder = 2 })
+        c.body = make("Frame", { Size = UDim2.new(1, -16, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 3 }, card)
+        make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, c.body)
+        local pad = make("UIPadding", { PaddingLeft = UDim.new(0, 8) }, c.body)
+        pCards[p.key] = c
+        bind(c.toggle.MouseButton1Click, function()
+            if p.loaded then
+                PLG.disable(p)
+                return
+            end
+            if not PLG.enabled[p.key] and not (confirmKey == p.key and os.clock() - confirmAt < 4) then
+                confirmKey, confirmAt = p.key, os.clock()
+                c.toggle.Text = "Yakin?"
+                task.delay(4, function()
+                    if alive() and confirmKey == p.key then
+                        confirmKey = nil
+                        paintPluginCard(p)
+                    end
+                end)
+                setStatus("Plugin berjalan dengan hak executor penuh. Tap \"Yakin?\" sekali lagi jika kamu mempercayainya.", "warn")
+                return
+            end
+            confirmKey = nil
+            PLG.enable(p)
+        end)
+        bind(c.reload.MouseButton1Click, function() PLG.load(p) end)
+        return c
+    end
+
+    local function renderPlugins()
+        local keep = {}
+        for i, p in ipairs(PLG.list) do
+            keep[p.key] = true
+            local c = pCards[p.key] or buildPluginCard(p, i)
+            c.card.LayoutOrder = i
+            paintPluginCard(p)
+        end
+        for key, c in pairs(pCards) do
+            if not keep[key] then
+                c.card:Destroy()
+                pCards[key] = nil
+            end
+        end
+        pgEmpty.Visible = #PLG.list == 0
+    end
+    H.plugins = renderPlugins
+
+    -- UI yang dibuat plugin lewat SL.ui.* ditaruh di body kartu plugin tersebut
+    function H.pluginButton(p, text, cb)
+        local c = pCards[p.key]
+        if not c then return nil end
+        local b = button(c.body, text, T.panel2, { Size = UDim2.new(1, 0, 0, 26), TextSize = 11, LayoutOrder = #c.body:GetChildren() + 1 })
+        if type(cb) == "function" then
+            bind(b.MouseButton1Click, function()
+                task.spawn(function()
+                    local ok, err = pcall(cb)
+                    if not ok then logLine("[plugin " .. p.key .. "] tombol: " .. tostring(err), "err") end
+                end)
+            end)
+        end
+        return b
+    end
+    function H.pluginPanel(p, height)
+        local c = pCards[p.key]
+        if not c then return nil end
+        return make("Frame", {
+            Size = UDim2.new(1, 0, 0, math.clamp(height, 20, 400)), BackgroundColor3 = T.panel, BorderSizePixel = 0,
+            LayoutOrder = #c.body:GetChildren() + 1, ClipsDescendants = true,
+        }, c.body)
+    end
+    function H.pluginClear(p)
+        local c = pCards[p.key]
+        if not c then return end
+        for _, ch in ipairs(c.body:GetChildren()) do
+            if not ch:IsA("UIListLayout") and not ch:IsA("UIPadding") then ch:Destroy() end
+        end
+    end
+
+    bind(pgScan.MouseButton1Click, function() PLG.scan() end)
+    bind(pgSample.MouseButton1Click, function()
+        local n = PLG.writeSamples()
+        notify(n > 0 and ("Dibuat " .. n .. " plugin contoh di " .. PLG.dir) or "Gagal membuat contoh (writefile tidak ada?).", n > 0 and "ok" or "err")
+    end)
+    bind(pgPaste.MouseButton1Click, function() pasteFrame.Visible = not pasteFrame.Visible end)
+    bind(pasteCancel.MouseButton1Click, function() pasteFrame.Visible = false end)
+    bind(pasteSave.MouseButton1Click, function()
+        if pasteCode.Text:gsub("%s", "") == "" then setStatus("Kode plugin kosong.", "warn") return end
+        local ok, res = PLG.save(pasteName.Text, pasteCode.Text)
+        if ok then
+            notify("Plugin disimpan: " .. res .. " (aktifkan dari daftar)", "ok")
+            pasteFrame.Visible = false
+            pasteCode.Text = ""
+        else
+            notify("Gagal menyimpan plugin: " .. tostring(res), "err")
+        end
+    end)
+    onTab.plugins = function() PLG.scan() end
+    end
+
     -- ===============================================================
     -- Halaman LOG
     -- ===============================================================
@@ -3575,8 +6541,60 @@ local function buildGui()
     switchRow("Taruh di depan kamera", "Untuk target di dalam Workspace. Batch otomatis diberi jarak.", "SpawnInFrontOfCamera")
     switchRow("Sembunyikan UI setelah import", "UI menutup ke tombol SL kecil, hasilnya muncul sebagai notifikasi.", "AutoHideAfterImport")
 
+    local function choiceRow(title, desc, key, options, onChange)
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = nextOrder(),
+        }, setList)
+        corner(row, 8)
+        label(row, { Text = title, Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -140, 0, 16), Font = Enum.Font.GothamMedium })
+        label(row, {
+            Text = desc, Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -140, 0, 26), TextSize = 10,
+            TextColor3 = T.sub, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+        })
+        local btn = button(row, "", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(112, 28), TextSize = 11,
+        })
+        local function paint()
+            for _, o in ipairs(options) do
+                if o.value == CONFIG[key] then btn.Text = o.text end
+            end
+        end
+        paint()
+        refreshers[#refreshers + 1] = paint
+        bind(btn.MouseButton1Click, function()
+            dropdown(btn, options, CONFIG[key], function(v)
+                CONFIG[key] = v
+                paint()
+                E.saveSettings()
+                if onChange then onChange() end
+            end)
+        end)
+    end
+
+    section("Import aman")
+    switchRow("Anchor otomatis saat import", "Part yang tidak di-anchor di-anchor sementara supaya model tidak runtuh / berantakan karena fisika. Nilai asli disimpan; tombol \"Lepas anchor asli\" di tab Studio mengembalikannya.", "FreezeOnImport")
+    switchRow("Cek integritas", "Bandingkan isi file dengan objek yang benar-benar terbentuk dan laporkan jika ada yang hilang.", "IntegrityCheck")
+
+    section("Aset & place")
+    choiceRow("Gambar diimport sebagai", "Decal pada part terpilih / papan baru, atau ImageLabel untuk GUI.", "ImageMode",
+        { { text = "Decal (3D)", value = "decal" }, { text = "ImageLabel (GUI)", value = "gui" } })
+    choiceRow("Sisi decal", "Sisi part yang diberi decal saat ada part terpilih.", "DecalFace",
+        { { text = "Front", value = "Front" }, { text = "Back", value = "Back" }, { text = "Left", value = "Left" },
+          { text = "Right", value = "Right" }, { text = "Top", value = "Top" }, { text = "Bottom", value = "Bottom" },
+          { text = "Semua sisi", value = "All" } })
+    choiceRow("Mode import place (.rbxl)", "Folder = tiap service dibungkus Folder di target. Merge = isi Workspace / ReplicatedStorage / StarterGui dst. langsung masuk service aslinya.", "PlaceMode",
+        { { text = "Folder", value = "folder" }, { text = "Merge ke service", value = "merge" } })
+
+    section("Studio")
+    switchRow("Operasi sampai turunan", "Anchor / CanCollide / dll. berlaku juga ke part di dalam model terpilih.", "OpDescendants", function() fire("selection2") end)
+    switchRow("Skala seragam", "Alat Skala menskalakan seragam (satu part pun). Model selalu seragam supaya weld & mesh tetap utuh.", "UniformScale", function() fire("tool") end)
+    switchRow("Balik arah putar", "Aktifkan jika alat Putar berputar ke arah yang berlawanan dengan tarikan.", "RotateInvert")
+    switchRow("Tampilkan toolbar", "Baris alat (Pilih / Geser / Skala / Putar, Anchor, Group, Undo) di bawah judul.", "ShowToolbar", layoutBody)
+
     section("Alat")
     actionRow("Scan ulang sekarang", T.purple, function() E.rescan(false) end)
+    actionRow("Coba lagi hook seleksi Studio Lite", T.panel2, function() task.spawn(SEL.retryHook) end)
+    actionRow("Pindai plugin", T.panel2, function() PLG.scan() end)
     actionRow("Scan struktur script Studio Lite (diagnosa)", T.panel2, E.scanStudioLite)
     actionRow("Scan GUI Explorer Studio Lite (diagnosa)", T.panel2, E.scanExplorerGui)
     actionRow("Salin script berikutnya dari import terakhir", T.panel2, E.copyNextScript)
@@ -3673,6 +6691,25 @@ local function buildGui()
         paintXInfo()
     end
 
+    local function refreshStudioUI()
+        UI.paintToolbar()
+        UI.paintStudio()
+    end
+    H.selection2 = refreshStudioUI
+    H.hist = refreshStudioUI
+    H.tool = refreshStudioUI
+    H.toolbox = function() UI.paintDrawer() end
+    H.settingsChanged = function()
+        layoutBody()
+        UI.paintToolbar()
+    end
+    onTab.studio = function()
+        task.spawn(function()
+            pcall(SEL.refresh)
+            refreshStudioUI()
+        end)
+    end
+
     -- ---- Mulai ----
     paintChips()
     paintAction()
@@ -3690,6 +6727,13 @@ local function buildGui()
     end
     setStatus("Siap. Memindai file...", "info")
     E.rescan(false)
+    TOOL.space = (CONFIG.ToolSpace == "local") and "local" or "global"
+    layoutBody()
+    UI.paintToolbar()
+    UI.paintStudio()
+    SEL.start()
+    PLG.scan()
+    PLG.loadEnabled()
 end
 
 ensureFolder()
