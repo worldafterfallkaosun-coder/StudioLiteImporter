@@ -1,6 +1,16 @@
 --[[
-    Studio Lite Importer v5 Studio  (Delta executor)
-    Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
+    Studio Lite Importer v6  (Delta executor)
+    Target : Studio Mobi / SMFX (PlaceId 130420265455102)  -- juga masih jalan di Studio Lite (PlaceId 10959918411)
+
+    Baru di v6
+      - Auto-deteksi map: kalau ReplicatedStorage.SMFX ada (Studio Mobi), hook diarahkan ke map itu.
+        Hook lama Studio Lite (StudioGui.ExplorerPanel) tidak dipakai di sana.
+      - Seleksi di Studio Mobi dibaca dari penanda seleksi game (SelectionBox / Highlight / SelectionSphere),
+        kalau kosong pakai seleksi internal importer.
+      - Objek bawaan game (ReplicatedStorage.SMFX dan karakter pemain) dilindungi dari operasi importer.
+      - Tombol bulat "SL" yang melayang dan nutupin UI Toolbox game DIHILANGKAN. Tombol X sekarang melipat
+        jendela ke title bar (ketuk lagi tombol lipat untuk membuka). RightControl tetap sembunyi / tampil (PC).
+        Notifikasi (toast) pindah ke tengah atas, bukan di sisi kiri.
 
     Cara pakai
       1. Taruh file di folder workspace Delta (disarankan <Delta>/Workspace/StudioLiteImports/):
@@ -55,6 +65,7 @@ local CONFIG = {
     UniformScale = false,
     RotateInvert = false,
     ShowToolbar = true,
+    ShowOpenButton = false,      -- tombol bulat "SL" melayang (nutupin UI game); false = dihilangkan
     MoveSnap = 1, RotSnap = 15, ScaleSnap = 1, ToolSpace = "global",
     ToolboxPageSize = 30,
 
@@ -72,8 +83,14 @@ local CONFIG = {
     ExplorerSearchResults = 300, -- batas hasil pencarian
 
     ToggleKey = Enum.KeyCode.RightControl,
-    StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true },
+    StudioLitePlaceIds = { [10959918411] = true, [109960802077678] = true, [130420265455102] = true },
 }
+
+-- profil map: "SMFX" (Studio Mobi) atau "StudioLite"
+do
+    local okm, hasSm = pcall(function() return game:GetService("ReplicatedStorage"):FindFirstChild("SMFX") ~= nil end)
+    CONFIG.Map = ((okm and hasSm) or game.PlaceId == 130420265455102) and "SMFX" or "StudioLite"
+end
 
 local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
@@ -1535,6 +1552,12 @@ local function isProtected(inst)
     if inst:IsA("Terrain") or inst:IsA("Camera") then return true end
     local sl = ReplicatedStorageSvc:FindFirstChild("StudioLiteFolder")
     if sl and (inst == sl or inst:IsDescendantOf(sl)) then return true end
+    if CONFIG.Map == "SMFX" then
+        local sm = ReplicatedStorageSvc:FindFirstChild("SMFX")
+        if sm and (inst == sm or inst:IsDescendantOf(sm)) then return true end
+        local ch = LocalPlayer and LocalPlayer.Character
+        if ch and (inst == ch or inst:IsDescendantOf(ch)) then return true end
+    end
     if inst:IsDescendantOf(Players) then return true end
     local okc, inCore = pcall(function() return CoreGuiSvc ~= nil and inst:IsDescendantOf(CoreGuiSvc) end)
     if okc and inCore then return true end
@@ -2624,6 +2647,38 @@ function E.scanExplorerGui()
             dump(c, depth + 1)
         end
     end
+    if CONFIG.Map == "SMFX" then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "== SMFX (Studio Mobi): GUI game di PlayerGui.SMFX"
+        local smg = pg:FindFirstChild("SMFX")
+        if smg then
+            for _, c in ipairs(kidsOf(smg)) do
+                local extra = ""
+                if c:IsA("GuiObject") then
+                    extra = string.format("  pos=%.0f,%.0f size=%.0f,%.0f visible=%s",
+                        c.AbsolutePosition.X, c.AbsolutePosition.Y, c.AbsoluteSize.X, c.AbsoluteSize.Y, tostring(c.Visible))
+                end
+                lines[#lines + 1] = describe(c) .. extra
+                dump(c, 1)
+            end
+        else
+            lines[#lines + 1] = "(PlayerGui.SMFX tidak ada)"
+        end
+        local rsm = game:GetService("ReplicatedStorage"):FindFirstChild("SMFX")
+        local exp = rsm and rsm:FindFirstChild("Explorer")
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "== ReplicatedStorage.SMFX.Explorer"
+        if exp then
+            for _, c in ipairs(kidsOf(exp)) do lines[#lines + 1] = describe(c) end
+        else
+            lines[#lines + 1] = "(tidak ada)"
+        end
+        local sx = SEL.smx
+        local n = 0
+        for _ in pairs(sx.adorn) do n = n + 1 end
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "Penanda seleksi terlacak: " .. n .. " | mode seleksi: " .. tostring(SEL.mode)
+    end
     local hits = 0
     for _, d in ipairs(pg:GetDescendants()) do
         if d.Name:lower():find("explorer", 1, true) then
@@ -2763,7 +2818,88 @@ local function invokeTimeout(bf, timeout, ...)
     return ok, res
 end
 
+-- ---- Studio Mobi (SMFX): tidak ada hook GetSelection / SetSelection ----
+-- Seleksi game digambar sebagai SelectionBox / SelectionSphere / Highlight. Penanda itu dilacak
+-- (sekali scan + DescendantAdded) lalu Adornee-nya dibaca sebagai seleksi game.
+SEL.smx = { adorn = {}, started = false, pinned = false, pinSet = nil }
+
+local function smxTrack(d)
+    if d:IsA("SelectionBox") or d:IsA("SelectionSphere") or d:IsA("Highlight") then
+        SEL.smx.adorn[d] = true
+    end
+end
+
+function SEL.smxStart()
+    local sx = SEL.smx
+    if sx.started then return end
+    sx.started = true
+    pcall(function()
+        for _, d in ipairs(workspace:GetDescendants()) do smxTrack(d) end
+        bind(workspace.DescendantAdded, smxTrack)
+    end)
+    pcall(function()
+        local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then
+            for _, d in ipairs(pg:GetDescendants()) do smxTrack(d) end
+            bind(pg.DescendantAdded, smxTrack)
+        end
+    end)
+end
+
+function SEL.smxRead()
+    local out, seen = {}, {}
+    for d in pairs(SEL.smx.adorn) do
+        if d.Parent == nil then
+            SEL.smx.adorn[d] = nil
+        else
+            local shown = true
+            if d:IsA("Highlight") then
+                shown = d.Enabled and (d.FillTransparency < 1 or d.OutlineTransparency < 1)
+            elseif d:IsA("SelectionBox") or d:IsA("SelectionSphere") then
+                shown = d.Transparency < 1 or d.SurfaceTransparency < 1
+            end
+            if shown then
+                local a = d.Adornee
+                if a == nil and d:IsA("Highlight") then a = d.Parent end
+                if typeof(a) == "Instance" and a ~= workspace and liveInst(a) and not seen[a]
+                    and a:IsDescendantOf(workspace) and not isProtected(a) then
+                    seen[a] = true
+                    out[#out + 1] = a
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function smxSameSet(a, b)
+    if #a ~= #b then return false end
+    local s = {}
+    for _, i in ipairs(a) do s[i] = true end
+    for _, i in ipairs(b) do
+        if not s[i] then return false end
+    end
+    return true
+end
+
 function SEL.read()
+    if CONFIG.Map == "SMFX" then
+        SEL.smxStart()
+        local ok, g = pcall(SEL.smxRead)
+        if not ok then g = {} end
+        local sx = SEL.smx
+        if sx.pinned and sx.pinSet and smxSameSet(g, sx.pinSet) then
+            SEL.mode = "internal"
+            return collectInstances(SEL.internal)
+        end
+        sx.pinned = false
+        if #g > 0 then
+            SEL.mode = "smfx"
+            return g
+        end
+        SEL.mode = "internal"
+        return collectInstances(SEL.internal)
+    end
     local h = (not SEL.hookDead) and studioHook("GetSelection") or nil
     if h then
         local ok, res = invokeTimeout(h, 0.6)
@@ -2802,6 +2938,11 @@ end
 function SEL.set(list)
     list = collectInstances(list)
     SEL.internal = list
+    if CONFIG.Map == "SMFX" then
+        local okp, cur = pcall(SEL.smxRead)
+        SEL.smx.pinned = true
+        SEL.smx.pinSet = okp and cur or {}
+    end
     local h = (not SEL.hookDead) and studioHook("SetSelection") or nil
     if h then
         local ok = invokeTimeout(h, 0.6, list)
@@ -3570,7 +3711,7 @@ function TOOL.cycleSnap(kind, dir)
 end
 
 function TOOL.snapText(kind)
-    if kind == "rot" then return (CONFIG.RotSnap > 0) and (CONFIG.RotSnap .. "ТА") or "off" end
+    if kind == "rot" then return (CONFIG.RotSnap > 0) and (CONFIG.RotSnap .. "°") or "off" end
     local v = (kind == "scale") and CONFIG.ScaleSnap or CONFIG.MoveSnap
     return (v > 0) and tostring(v) or "off"
 end
@@ -4277,10 +4418,15 @@ local function buildGui()
         toastLbl.TextTransparency = 0
         toastFrame.BackgroundTransparency = 0
         toastStroke.Transparency = 0
-        local mx, my = mini.Position.X.Offset, mini.Position.Y.Offset
-        local right = mx > viewport().X / 2
-        toastFrame.AnchorPoint = Vector2.new(right and 1 or 0, 0)
-        toastFrame.Position = UDim2.fromOffset(right and (mx + 44) or mx, (my > 44) and (my - 36) or (my + 50))
+        if CONFIG.ShowOpenButton then
+            local mx, my = mini.Position.X.Offset, mini.Position.Y.Offset
+            local right = mx > viewport().X / 2
+            toastFrame.AnchorPoint = Vector2.new(right and 1 or 0, 0)
+            toastFrame.Position = UDim2.fromOffset(right and (mx + 44) or mx, (my > 44) and (my - 36) or (my + 50))
+        else
+            toastFrame.AnchorPoint = Vector2.new(0.5, 0)
+            toastFrame.Position = UDim2.fromOffset(math.floor(viewport().X / 2), 64)
+        end
         toastFrame.Visible = true
         task.delay(3.2, function()
             if toastToken ~= tok or not alive() then return end
@@ -4546,7 +4692,7 @@ local function buildGui()
         if W.hidden then return end
         W.hidden = true
         tween(mainScale, 0.12, { Scale = 0.92 })
-        mini.Visible = true
+        mini.Visible = CONFIG.ShowOpenButton == true
         updateMini()
         if syncExplorer then syncExplorer() end
         task.delay(0.12, function()
@@ -4556,7 +4702,14 @@ local function buildGui()
 
     bind(btnMin.MouseButton1Click, toggleMin)
     bind(btnMax.MouseButton1Click, toggleMax)
-    bind(btnClose.MouseButton1Click, hideWindow) -- hanya menyembunyikan; engine tetap jalan
+    bind(btnClose.MouseButton1Click, function()
+        -- tanpa tombol "SL": X melipat jendela ke title bar (tidak menutupi UI game); engine tetap jalan
+        if CONFIG.ShowOpenButton then
+            hideWindow()
+        elseif not W.minimized then
+            toggleMin()
+        end
+    end)
 
     -- geser jendela lewat title bar, ketuk dua kali = maximize
     local lastTap = 0
@@ -6722,7 +6875,9 @@ local function buildGui()
         if alive() then relayoutFiles() end
     end)
     E.applyView()
-    if not CONFIG.StudioLitePlaceIds[game.PlaceId] then
+    if CONFIG.Map == "SMFX" then
+        logLine("Map: Studio Mobi (SMFX). Seleksi dibaca dari penanda seleksi game; ReplicatedStorage.SMFX dan karakter dilindungi. Tombol \"SL\" melayang dimatikan.", "info")
+    elseif not CONFIG.StudioLitePlaceIds[game.PlaceId] then
         logLine("PlaceId " .. tostring(game.PlaceId) .. " bukan Studio Lite resmi, tetap bisa dipakai.", "warn")
     end
     setStatus("Siap. Memindai file...", "info")
