@@ -1,5 +1,5 @@
 --[[
-    Studio Lite Importer v6  (Delta executor)
+    Studio Lite Importer v7  (Delta executor)
     Target : Studio Mobi / SMFX (PlaceId 130420265455102)  -- juga masih jalan di Studio Lite (PlaceId 10959918411)
 
     Baru di v6
@@ -8,9 +8,12 @@
       - Seleksi di Studio Mobi dibaca dari penanda seleksi game (SelectionBox / Highlight / SelectionSphere),
         kalau kosong pakai seleksi internal importer.
       - Objek bawaan game (ReplicatedStorage.SMFX dan karakter pemain) dilindungi dari operasi importer.
-      - Tombol bulat "SL" yang melayang dan nutupin UI Toolbox game DIHILANGKAN. Tombol X sekarang melipat
-        jendela ke title bar (ketuk lagi tombol lipat untuk membuka). RightControl tetap sembunyi / tampil (PC).
-        Notifikasi (toast) pindah ke tengah atas, bukan di sisi kiri.
+      - Tab Toolbox: panel detail di bagian bawah (yang nutupin hasil) DIHILANGKAN. Grid hasil sekarang penuh.
+        Ketuk kartu = pilih (tombol "Insert" muncul di kartu itu), ketuk dua kali = insert cepat.
+        Tombol kecil "Fav" dan "ID" ada di tiap kartu, aset audio punya tombol "Putar".
+      - Tombol bulat "SL" kembali normal (opsi CONFIG.ShowOpenButton = false kalau mau dimatikan).
+      - Import di Studio Mobi bersifat lokal (client): objek ada di Workspace pemain ini, tapi Penjelajah game
+        dikirim dari server, jadi objek itu tidak tampil di sana dan tidak ikut Save game.
 
     Cara pakai
       1. Taruh file di folder workspace Delta (disarankan <Delta>/Workspace/StudioLiteImports/):
@@ -65,7 +68,7 @@ local CONFIG = {
     UniformScale = false,
     RotateInvert = false,
     ShowToolbar = true,
-    ShowOpenButton = false,      -- tombol bulat "SL" melayang (nutupin UI game); false = dihilangkan
+    ShowOpenButton = true,       -- tombol bulat "SL" saat jendela disembunyikan; false = dimatikan (X melipat jendela)
     MoveSnap = 1, RotSnap = 15, ScaleSnap = 1, ToolSpace = "global",
     ToolboxPageSize = 30,
 
@@ -1697,6 +1700,7 @@ local function finishImport(objs, roots, label, how, dest, opts)
         end
     end
     if froze > 0 then msg = msg .. string.format(", %d part di-anchor", froze) end
+    if CONFIG.Map == "SMFX" then msg = msg .. " | lokal (client): tidak tampil di Penjelajah game" end
     if CONFIG.IntegrityCheck and roots then
         local okr, rep = pcall(integrityReport, roots, objs)
         if okr then msg = msg .. ", " .. integrityText(rep) end
@@ -6052,7 +6056,7 @@ local function buildGui()
     })
 
     local tGrid = make("ScrollingFrame", {
-        Position = UDim2.fromOffset(8, 96), Size = UDim2.new(1, -16, 1, -(96 + 92)), BackgroundColor3 = T.panel,
+        Position = UDim2.fromOffset(8, 96), Size = UDim2.new(1, -16, 1, -(96 + 8)), BackgroundColor3 = T.panel,
         BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = T.line,
         CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
     }, PT)
@@ -6081,7 +6085,7 @@ local function buildGui()
     -- drawer detail (bawah)
     local tDrawer = make("Frame", {
         AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -4), Size = UDim2.new(1, -16, 0, 84),
-        BackgroundColor3 = T.panel, BorderSizePixel = 0,
+        BackgroundColor3 = T.panel, BorderSizePixel = 0, Visible = false,
     }, PT)
     corner(tDrawer, 8)
     local dThumb = make("ImageLabel", {
@@ -6131,9 +6135,11 @@ local function buildGui()
         for id, c in pairs(cards) do
             local on = tbs.sel and tbs.sel.id == id
             c.stroke.Transparency = on and 0 or 1
+            if c.ins then c.ins.Visible = on and true or false end
         end
     end
 
+    local renderCards
     local function addCard(it, order)
         local f = make("TextButton", {
             Text = "", AutoButtonColor = false, BackgroundColor3 = T.row, BorderSizePixel = 0, LayoutOrder = order,
@@ -6154,11 +6160,42 @@ local function buildGui()
             Position = UDim2.new(0, 6, 1, -32), Size = UDim2.new(1, -12, 0, 28), Text = it.name, TextSize = 10,
             TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextTruncate = Enum.TextTruncate.AtEnd,
         })
-        if TB.isFav(it.id) then
-            label(f, { Position = UDim2.fromOffset(8, 6), Size = UDim2.fromOffset(16, 16), Text = "*", TextColor3 = T.warn,
-                Font = Enum.Font.GothamBold, TextSize = 16 })
+        -- tombol kecil di kartu (pengganti panel detail bawah)
+        local fb = button(f, TB.isFav(it.id) and "Fav*" or "Fav", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -30, 0, 6), Size = UDim2.fromOffset(32, 18), TextSize = 9 })
+        local ib = button(f, "ID", T.panel2, {
+            AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 6), Size = UDim2.fromOffset(24, 18), TextSize = 9 })
+        local sb = button(f, "Insert", T.ok, {
+            AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 4, 1, -4), Size = UDim2.new(1, -8, 0, 26),
+            TextSize = 12, Font = Enum.Font.GothamBold })
+        sb.Visible = (tbs.sel ~= nil and tbs.sel.id == it.id)
+        bind(fb.MouseButton1Click, function()
+            local on = TB.toggleFav(it)
+            setStatus(on and "Ditambahkan ke favorit." or "Dihapus dari favorit.", "info")
+            renderCards()
+        end)
+        bind(ib.MouseButton1Click, function()
+            local clip = setclipboard or toclipboard
+            if clip and pcall(clip, tostring(it.id)) then
+                setStatus("ID disalin: " .. it.id, "ok")
+            else
+                setStatus("Executor tidak punya setclipboard.", "err")
+            end
+        end)
+        bind(sb.MouseButton1Click, function()
+            if not TB.busy then E.insertAsset(it) end
+        end)
+        if it.kind == "audio" then
+            local pb = button(f, "Putar", T.purple, { Position = UDim2.fromOffset(4, 6), Size = UDim2.fromOffset(40, 18), TextSize = 9 })
+            bind(pb.MouseButton1Click, function()
+                if pv.sound then
+                    stopPreview()
+                    return
+                end
+                startPreview("rbxassetid://" .. it.id, function(txt) pb.Text = txt end)
+            end)
         end
-        cards[it.id] = { frame = f, stroke = st }
+        cards[it.id] = { frame = f, stroke = st, ins = sb }
         bind(f.MouseButton1Click, function()
             local now = os.clock()
             if tbs.lastTapId == it.id and now - tbs.lastTap < 0.45 then
@@ -6169,13 +6206,13 @@ local function buildGui()
             tbs.lastTapId, tbs.lastTap = it.id, now
             tbs.sel = it
             paintCards()
-            paintDrawer()
+            setStatus(string.format("%s  |  ID %d  |  %s", tostring(it.name), it.id, tostring(it.kind)), "info")
         end)
         return f
     end
 
     local moreBtn = nil
-    local function renderCards()
+    function renderCards()
         for _, c in pairs(cards) do c.frame:Destroy() end
         cards = {}
         if moreBtn then moreBtn:Destroy() moreBtn = nil end
@@ -6876,7 +6913,7 @@ local function buildGui()
     end)
     E.applyView()
     if CONFIG.Map == "SMFX" then
-        logLine("Map: Studio Mobi (SMFX). Seleksi dibaca dari penanda seleksi game; ReplicatedStorage.SMFX dan karakter dilindungi. Tombol \"SL\" melayang dimatikan.", "info")
+        logLine("Map: Studio Mobi (SMFX). Seleksi dibaca dari penanda seleksi game; ReplicatedStorage.SMFX dan karakter dilindungi. Import bersifat lokal (tidak tampil di Penjelajah game).", "info")
     elseif not CONFIG.StudioLitePlaceIds[game.PlaceId] then
         logLine("PlaceId " .. tostring(game.PlaceId) .. " bukan Studio Lite resmi, tetap bisa dipakai.", "warn")
     end
@@ -6893,6 +6930,7 @@ end
 
 ensureFolder()
 E.loadSettings()
+if CONFIG.Map == "SMFX" then CONFIG.InstallScriptText = false end -- tidak ada editor SL_CodeTextBox di Studio Mobi
 local okGui, errGui = pcall(buildGui)
 if not okGui then
     warn("[SLImporter] GUI gagal dibuat: " .. tostring(errGui))
