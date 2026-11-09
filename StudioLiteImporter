@@ -39,6 +39,21 @@
       RightShift = tampil / sembunyi Studio Editor, RightControl = tampil / sembunyi jendela importer.
 ]]
 
+--[[
+    v7 (perbaikan di atas v6) - ringkas, detail lengkap ada di CATATAN_LANJUTAN_v7.md
+      1. Play / Pause / Stop: satu klik = satu tembakan (v6 menembak DUA kali: firesignal + getconnections,
+         jadi Pause/Stop batal sendiri dan Play macet di "Memulai Server..."). Pencarian tombol lebih luas,
+         fallback klik virtual, dan dump nama tombol asli ke StudioLiteImports/native_ui_dump.txt.
+      2. Error "lacking capability Plugin": identity thread dinaikkan sebelum hook UI jalan, kalau masih gagal
+         hook dijalankan ulang dari Heartbeat milik kita.
+      3. Script editor sendiri (double-click script di Explorer / tab Script > Edit Script / menu klik kanan).
+         Script baru otomatis diberi struktur SL_CodeTextBox supaya editor bawaan Studio Lite tidak "read only".
+      4. StarterGui preview: ScreenGui / Frame di StarterGui ditampilkan di layar saat mode edit (klon tanpa script).
+         Frame/TextLabel dll yang dimasukkan ke StarterGui otomatis dibungkus ScreenGui.
+      5. Seleksi: saat Play hook bawaan tidak mengikuti seleksi kita, sehingga Anchor / CanCollide dll
+         melihat seleksi kosong. Sekarang seleksi kita dipertahankan (SEL.pinned).
+]]
+
 local CONFIG = {
     Folder = "StudioLiteImports",
     SettingsFile = "StudioLiteImports/ui_settings.json",
@@ -1244,8 +1259,23 @@ env.__SLImporterRun = runId
 local function alive() return env.__SLImporterRun == runId end
 
 local conns = {}
+
+-- v7: sebagian callback jalan dari thread game yang kekurangan capability ("lacking capability Plugin").
+-- Naikkan identity thread sebelum kode UI dijalankan.
+local fixIdentity
+do
+    local f = (syn and syn.set_thread_identity) or setthreadidentity or set_thread_identity
+        or setidentity or setthreadcontext or set_thread_context
+    fixIdentity = function()
+        if f then pcall(f, 8) end
+    end
+end
+
 local function bind(signal, fn)
-    local c = signal:Connect(fn)
+    local c = signal:Connect(function(...)
+        fixIdentity()
+        return fn(...)
+    end)
     conns[#conns + 1] = c
     return c
 end
@@ -1278,18 +1308,45 @@ local X = {
 -- UI mendaftarkan callback di sini; engine hanya memanggil lewat fire()
 local H = {}
 local HL = {} -- listener tambahan (dipakai Studio Editor): HL[nama] = { fn, ... }
+-- v7: antrean kerja yang dijalankan dari Heartbeat milik kita (identity thread normal)
+E.deferQ = {}
+function E.defer(fn)
+    E.deferQ[#E.deferQ + 1] = fn
+end
+do
+    bind(game:GetService("RunService").Heartbeat, function()
+        local q = E.deferQ
+        if #q == 0 then return end
+        E.deferQ = {}
+        for _, job in ipairs(q) do
+            local ok, err = pcall(job)
+            if not ok then warn("[SLImporter] deferred: " .. tostring(err)) end
+        end
+    end)
+end
+
+function E.runHook(label, fn, ...)
+    fixIdentity()
+    local ok, err = pcall(fn, ...)
+    if ok then return end
+    if tostring(err):find("capability", 1, true) then
+        -- thread saat ini kekurangan capability: ulangi dari Heartbeat milik kita
+        local args = table.pack(...)
+        E.defer(function()
+            local ok2, err2 = pcall(fn, table.unpack(args, 1, args.n))
+            if not ok2 then warn("[SLImporter] " .. label .. ": " .. tostring(err2)) end
+        end)
+    else
+        warn("[SLImporter] " .. label .. ": " .. tostring(err))
+    end
+end
+
 local function fire(name, ...)
     local f = H[name]
-    if f then
-        local ok, err = pcall(f, ...)
-        if not ok then warn("[SLImporter] hook " .. name .. ": " .. tostring(err)) end
-    end
+    if f then E.runHook("hook " .. name, f, ...) end
     local l = HL[name]
     if l then
-        for _, fn in ipairs(l) do
-            local ok, err = pcall(fn, ...)
-            if not ok then warn("[SLImporter] listener " .. name .. ": " .. tostring(err)) end
-        end
+        for _, fn in ipairs(l) do E.runHook("listener " .. name, fn, ...) end
     end
 end
 
@@ -2802,7 +2859,29 @@ function SEL.read()
         local ok, res = invokeTimeout(h, 0.6)
         if ok then
             SEL.mode, SEL.fails = "studio", 0
-            return collectInstances(res)
+            local got = collectInstances(res)
+            -- v7: saat Play, hook bawaan tidak mengikuti seleksi kita (selalu kosong / basi), sehingga
+            -- Anchor / CanCollide dll melihat seleksi kosong. Selama hook tidak mengikuti, pakai seleksi internal.
+            if SEL.pinned then
+                local internal = collectInstances(SEL.internal)
+                local function same(a, b)
+                    if #a ~= #b then return false end
+                    for i = 1, #a do
+                        if a[i] ~= b[i] then return false end
+                    end
+                    return true
+                end
+                local last = SEL.lastHook
+                SEL.lastHook = got
+                if same(got, internal) then
+                    SEL.pinned = false
+                elseif last and not same(got, last) then
+                    SEL.pinned = false -- seleksi asli berubah sendiri: hormati
+                else
+                    return internal
+                end
+            end
+            return got
         end
         SEL.fails = SEL.fails + 1
         if SEL.fails >= 3 then
@@ -2835,6 +2914,7 @@ end
 function SEL.set(list)
     list = collectInstances(list)
     SEL.internal = list
+    SEL.pinned, SEL.lastHook = true, nil
     local h = (not SEL.hookDead) and studioHook("SetSelection") or nil
     if h then
         local ok = invokeTimeout(h, 0.6, list)
@@ -6401,7 +6481,7 @@ local CORE = {
     CONFIG = CONFIG, H = H, fire = fire, listen = E.listen, logLine = logLine, setStatus = setStatus,
     notify = notify, bind = bind, alive = alive, env = env, isProtected = isProtected, topLevel = topLevel,
     inGame = inGame, kidsOf = kidsOf, aabbOf = aabbOf, pivotOf = pivotOf, xformItems = xformItems,
-    SERVICE_CLASS = SERVICE_CLASS, imp = nil,
+    SERVICE_CLASS = SERVICE_CLASS, imp = nil, fixIdentity = fixIdentity,
 }
 
 local function __StudioEditor(...)
@@ -6514,6 +6594,7 @@ local gen = 0   -- naik tiap build; loop lama berhenti sendiri
 
 local function bind2(signal, fn, list)
     local c = signal:Connect(function(...)
+        if CORE.fixIdentity then CORE.fixIdentity() end
         local ok, err = pcall(fn, ...)
         if not ok then logLine("Studio: " .. tostring(err), "err") end
     end)
@@ -6525,6 +6606,7 @@ end
 -- koneksi ke sinyal milik instance (ikut mati saat instance di-Destroy), tidak perlu dilacak
 local function on(signal, fn)
     return signal:Connect(function(...)
+        if CORE.fixIdentity then CORE.fixIdentity() end
         local ok, err = pcall(fn, ...)
         if not ok then logLine("Studio: " .. tostring(err), "err") end
     end)
@@ -8685,6 +8767,23 @@ function ACT.insert(class, parent, init)
         notify(class .. " tidak bisa dibuat dari client.", "warn")
         return nil
     end
+    -- v7: objek GUI harus ada di dalam ScreenGui supaya tampil; kalau induknya StarterGui / Workspace / service, bungkus
+    if inst:IsA("GuiObject") then
+        local sgSvc = game:GetService("StarterGui")
+        if parent == sgSvc or parent == workspace or parent.Parent == game then
+            local host
+            for _, c in ipairs(sgSvc:GetChildren()) do
+                if c:IsA("ScreenGui") then host = c break end
+            end
+            if not host then
+                host = Instance.new("ScreenGui")
+                host.Name = "ScreenGui"
+                host.ResetOnSpawn = false
+                host.Parent = sgSvc
+            end
+            parent = host
+        end
+    end
     if inst:IsA("BasePart") then
         inst.Anchored = true
         local cam = workspace.CurrentCamera
@@ -8706,6 +8805,10 @@ function ACT.insert(class, parent, init)
         pcall(function() inst:Destroy() end)
         return nil
     end
+    if inst:IsA("LuaSourceContainer") then
+        local okH, whyH = ACT.ensureScriptHolder(inst, ACT.TEMPLATES[inst.ClassName] or "")
+        if not okH then notify("Editor script: " .. tostring(whyH), "warn") end
+    end
     HIST.push("Insert " .. class, function()
         pcall(function() inst.Parent = nil end)
     end, function()
@@ -8715,6 +8818,139 @@ function ACT.insert(class, parent, init)
     setSel({ inst })
     setStatus("Insert " .. class .. " -> " .. parent.Name, "ok")
     return inst
+end
+
+-- ---------------------------------------------------------------
+-- v7: Editor script sendiri (teks disimpan di SL_CodeTextBox seperti editor bawaan Studio Lite)
+-- ---------------------------------------------------------------
+ACT.TEMPLATES = {
+    Script = 'print("Hello world!")\n',
+    LocalScript = 'print("Hello world!")\n',
+    ModuleScript = 'local module = {}\n\nreturn module\n',
+}
+
+-- pastikan script punya SL_CodeTextBox (struktur yang dibaca editor bawaan). return ok, keterangan, textbox
+function ACT.ensureScriptHolder(inst, src)
+    if not inst or not inst:IsA("LuaSourceContainer") then return false, "bukan script" end
+    local box = inst:FindFirstChild(HOLDER_BOX)
+    if box and box:IsA("TextBox") then return true, "sudah ada", box end
+    src = src or ""
+    local okI, stats = pcall(installScriptText, { { inst = inst, class = inst.ClassName, source = src } })
+    box = inst:FindFirstChild(HOLDER_BOX)
+    if okI and stats and stats.ok > 0 and box then return true, "native", box end
+    -- fallback: struktur minimal (SL_CodeTextBox + SaveChangesTo menunjuk dirinya sendiri)
+    local okF, errF = pcall(function()
+        local tb = Instance.new("TextBox")
+        tb.Name = HOLDER_BOX
+        tb.MultiLine = true
+        tb.ClearTextOnFocus = false
+        tb.Text = src
+        tb.Parent = inst
+        local ptr = Instance.new("ObjectValue")
+        ptr.Name = HOLDER_PTR
+        ptr.Value = tb
+        ptr.Parent = tb
+    end)
+    box = inst:FindFirstChild(HOLDER_BOX)
+    if box then return true, "fallback", box end
+    return false, tostring(errF or (okI and stats and stats.firstReason) or "gagal membuat SL_CodeTextBox")
+end
+
+function ACT.readSource(inst)
+    local box = inst:FindFirstChild(HOLDER_BOX)
+    if box and box:IsA("TextBox") then
+        local ok, t = pcall(function() return box.Text end)
+        if ok and type(t) == "string" then return t, box end
+    end
+    local ok, s = pcall(function() return inst.Source end)
+    if ok and type(s) == "string" then return s, nil end
+    return "", nil
+end
+
+function ACT.writeSource(inst, text)
+    text = tostring(text or "")
+    text = text:gsub("\r\n", "\n")
+    text = text:gsub("\r", "\n")
+    local box = inst:FindFirstChild(HOLDER_BOX)
+    if not (box and box:IsA("TextBox")) then
+        local ok, why, b = ACT.ensureScriptHolder(inst, text)
+        if not ok then return false, why end
+        box = b
+    end
+    local okW = pcall(function() box.Text = text end)
+    local ptr = box and box:FindFirstChild(HOLDER_PTR)
+    if ptr and ptr:IsA("ObjectValue") and ptr.Value and ptr.Value ~= box then
+        pcall(function()
+            local h = ptr.Value
+            if h:IsA("ValueBase") then h.Value = text else h.Text = text end
+        end)
+    end
+    pcall(function() inst:SetAttribute("SL_SourceLen", #text) end)
+    if not okW then return false, "gagal menulis ke SL_CodeTextBox" end
+    return true
+end
+
+function ACT.openEditor(inst)
+    if typeof(inst) ~= "Instance" or not inst:IsA("LuaSourceContainer") then
+        notify("Pilih Script / LocalScript / ModuleScript dulu.", "warn")
+        return
+    end
+    local okH, whyH = ACT.ensureScriptHolder(inst, ACT.TEMPLATES[inst.ClassName] or "")
+    if not okH then notify("Editor script: " .. tostring(whyH), "warn") end
+    local text = ACT.readSource(inst)
+    local M = UI.modal(780, 560, inst.ClassName .. ": " .. inst.Name)
+    local body = M.body
+    local bar = frame(body, { Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = T.panelHead })
+    local info = lbl(bar, { Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -250, 1, 0), Text = inst:GetFullName(),
+        TextColor3 = T.textDim, TextTruncate = Enum.TextTruncate.AtEnd, TextSize = 12 })
+    local bSave = UI.pillButton(bar, "Save", true, { Position = U2(1, -240, 0, 4), Size = UDim2.fromOffset(66, 28) })
+    local bBig = UI.pillButton(bar, "A+", false, { Position = U2(1, -168, 0, 4), Size = UDim2.fromOffset(40, 28) })
+    local bSmall = UI.pillButton(bar, "A-", false, { Position = U2(1, -124, 0, 4), Size = UDim2.fromOffset(40, 28) })
+    local bWrap = UI.pillButton(bar, "Wrap", false, { Position = U2(1, -80, 0, 4), Size = UDim2.fromOffset(72, 28) })
+    local sf = new("ScrollingFrame", { Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 1, -36), BackgroundColor3 = T.input,
+        BorderSizePixel = 0, ScrollBarThickness = 8, ScrollBarImageColor3 = T.lineStrong,
+        ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new() }, body)
+    local tb = new("TextBox", { Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Text = text, ClearTextOnFocus = false, MultiLine = true, TextEditable = true, Active = true,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Font = MONO, TextSize = 14,
+        TextColor3 = T.text, TextWrapped = true, BorderSizePixel = 0 }, sf)
+    pad(tb, 8, 8, 6, 6)
+
+    local latest, pending = text, false
+    local function save()
+        pending = false
+        local okW, whyW = ACT.writeSource(inst, latest)
+        info.Text = okW and ("Tersimpan  |  " .. inst:GetFullName()) or ("Gagal menyimpan: " .. tostring(whyW))
+        info.TextColor3 = okW and T.ok or T.err
+    end
+    on(tb:GetPropertyChangedSignal("Text"), function()
+        latest = tb.Text
+        if pending then return end
+        pending = true
+        task.delay(0.5, function() if pending then save() end end)
+    end)
+    on(tb.FocusLost, function() latest = tb.Text save() end)
+    on(bSave.MouseButton1Click, function() latest = tb.Text save() end)
+    on(bBig.MouseButton1Click, function() tb.TextSize = math.clamp(tb.TextSize + 2, 10, 30) end)
+    on(bSmall.MouseButton1Click, function() tb.TextSize = math.clamp(tb.TextSize - 2, 10, 30) end)
+    local wrapped = true
+    on(bWrap.MouseButton1Click, function()
+        wrapped = not wrapped
+        tb.TextWrapped = wrapped
+        tb.AutomaticSize = wrapped and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
+        sf.AutomaticCanvasSize = wrapped and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
+        sf.ScrollingDirection = wrapped and Enum.ScrollingDirection.Y or Enum.ScrollingDirection.XY
+    end)
+    return M
+end
+
+function ACT.openSelectedScript()
+    local s = SEL.list[1]
+    if s and s:IsA("LuaSourceContainer") then
+        ACT.openEditor(s)
+    else
+        notify("Pilih satu Script / LocalScript / ModuleScript di Explorer dulu.", "warn")
+    end
 end
 
 function ACT.pickInsert(parent)
@@ -8891,6 +9127,7 @@ function ACT.contextMenu(inst, sx, sy)
         { text = "Duplicate", key = "Ctrl+D", disabled = isLocked, fn = function() OPS.duplicate() end },
         { text = "Delete", key = "Del", disabled = isLocked, fn = function() OPS.delete() end },
         { text = "Rename", key = "F2", disabled = isLocked, fn = function() ACT.rename(inst) end },
+        { text = "Edit Script", disabled = isLocked or not inst:IsA("LuaSourceContainer"), fn = function() ACT.openEditor(inst) end },
         { sep = true },
         { text = "Group", key = "Ctrl+G", disabled = isLocked, fn = function() OPS.group() end },
         { text = "Ungroup", key = "Ctrl+U", disabled = isLocked, fn = function() OPS.ungroup() end },
@@ -9298,7 +9535,8 @@ function EX.build(parent)
             EX.lastClick = nil
             local d
             for _, row in ipairs(EX.rows) do if row.inst == inst then d = row break end end
-            if d and d.has then ACT.expand(inst, not ST.expanded[inst])
+            if inst:IsA("LuaSourceContainer") and not locked(inst) then ACT.openEditor(inst)
+            elseif d and d.has then ACT.expand(inst, not ST.expanded[inst])
             elseif not locked(inst) then ACT.rename(inst) end
         else
             EX.lastClick = { inst = inst, t = now }
@@ -10435,41 +10673,220 @@ local function matchAny(s, pats)
     return false
 end
 
--- tekan tombol bawaan (Name / Text cocok dengan pola Lua)
-function NV.press(pats)
+-- tekan tombol bawaan
+-- v7: satu klik = satu tembakan. v6 memakai firesignal DAN getconnections sekaligus (handler jalan dua kali, jadi
+-- Pause / Stop batal sendiri dan Play macet di "Memulai Server..."). Pencarian bisa "wide" (seluruh PlayerGui dan
+-- nama induk), ada fallback klik virtual, dan daftar tombol bisa ditulis ke file untuk diagnosa.
+NV.lastPress = {}
+
+function NV.roots(wide)
     local g = NV.gui()
-    if not g then return false end
-    local best
-    for _, d in ipairs(g:GetDescendants()) do
-        if d:IsA("GuiButton") then
-            local txt = ""
-            pcall(function() txt = d.Text end)
-            if matchAny(d.Name, pats) or matchAny(txt, pats) then
-                local top = d:FindFirstAncestor("TopBar") ~= nil
-                if not best or (top and not best.top) then best = { b = d, top = top } end
-            end
-        end
-    end
-    if not best then return false end
-    local b = best.b
-    local done = false
-    if firesignal then
-        for _, sig in ipairs({ "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }) do
-            local okS = pcall(function() firesignal(b[sig]) end)
-            done = done or okS
-        end
-    end
-    if getconnections then
-        for _, sig in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down" }) do
-            local okC, conns = pcall(getconnections, b[sig])
-            if okC and type(conns) == "table" then
-                for _, c in ipairs(conns) do
-                    if c.Fire then pcall(function() c:Fire() end) done = true end
+    local roots = {}
+    if g then roots[1] = g end
+    if wide then
+        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            for _, c in ipairs(pg:GetChildren()) do
+                if c ~= g and c:IsA("LayerCollector") and c.Name ~= "SLStudio" and c.Name ~= "SLStudioMini"
+                    and c.Name ~= "SLImporter" and c.Name:sub(1, 10) ~= "SLPreview_" then
+                    roots[#roots + 1] = c
                 end
             end
         end
     end
-    return done
+    return roots
+end
+
+function NV.candidates(pats, wide)
+    local out = {}
+    for ri, root in ipairs(NV.roots(wide)) do
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("GuiObject") then
+                local isBtn = d:IsA("GuiButton")
+                if isBtn or wide then
+                    local txt = ""
+                    if d:IsA("TextButton") or d:IsA("TextLabel") then pcall(function() txt = d.Text end) end
+                    local own = matchAny(d.Name, pats) or matchAny(txt, pats)
+                    local hit = own
+                    if not hit and wide and isBtn and d.Parent and d.Parent:IsA("GuiObject") then
+                        hit = matchAny(d.Parent.Name, pats)
+                    end
+                    if hit then
+                        local target
+                        if isBtn then
+                            target = d
+                        else
+                            for _, c in ipairs(d:GetDescendants()) do
+                                if c:IsA("GuiButton") then target = c break end
+                            end
+                            if not target then
+                                local a, n = d.Parent, 0
+                                while a and n < 3 do
+                                    if a:IsA("GuiButton") then target = a break end
+                                    a, n = a.Parent, n + 1
+                                end
+                            end
+                        end
+                        if target then
+                            local score = 0
+                            if ri == 1 then score = score + 30 end
+                            if target:FindFirstAncestor("TopBar") then score = score + 20 end
+                            if own then score = score + 10 end
+                            local ln = d.Name:lower()
+                            if ln == "play" or ln == "pause" or ln == "stop" then score = score + 15 end
+                            local vis = false
+                            pcall(function() vis = target.Visible end)
+                            if vis then score = score + 5 end
+                            score = score - math.min(#d.Name, 30) * 0.1
+                            out[#out + 1] = { b = target, score = score, name = d.Name, txt = txt }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.score > b.score end)
+    return out
+end
+
+local CLICK_SIGNALS = { "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }
+
+-- klik virtual (StudioGui diaktifkan sebentar di atas semua UI lalu disembunyikan lagi)
+function NV.virtualClick(b)
+    local okV, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if not okV or not vim then return nil end
+    local g = NV.gui()
+    if not g then return nil end
+    task.spawn(function()
+        local was, order = g.Enabled, g.DisplayOrder
+        pcall(function() g.Enabled = true end)
+        pcall(function() g.DisplayOrder = 2000 end)
+        task.wait(0.08)
+        local pos, size = b.AbsolutePosition, b.AbsoluteSize
+        local inset = Vector2.new(0, 0)
+        if not g.IgnoreGuiInset then
+            local okI, gi = pcall(function() return GuiService:GetGuiInset() end)
+            if okI and gi then inset = gi end
+        end
+        local x = pos.X + size.X / 2 + inset.X
+        local y = pos.Y + size.Y / 2 + inset.Y
+        pcall(function() vim:SendMouseButtonEvent(x, y, 0, true, game, 0) end)
+        task.wait(0.05)
+        pcall(function() vim:SendMouseButtonEvent(x, y, 0, false, game, 0) end)
+        task.wait(0.15)
+        pcall(function() g.DisplayOrder = order end)
+        pcall(function() g.Enabled = was end)
+    end)
+    return "virtual"
+end
+
+function NV.fire(b)
+    -- jumlah koneksi yang terlihat (kalau getconnections ada)
+    local total, known = 0, false
+    if getconnections then
+        for _, sig in ipairs(CLICK_SIGNALS) do
+            local okC, conns = pcall(getconnections, b[sig])
+            if okC and type(conns) == "table" then
+                known = true
+                total = total + #conns
+            end
+        end
+    end
+    if known and total == 0 then
+        -- tidak ada handler terlihat (game mungkin memakai InputBegan / getconnections tidak lengkap): klik virtual
+        local v = NV.virtualClick(b)
+        if v then return v end
+    end
+    if firesignal then
+        local any = false
+        for _, sig in ipairs(CLICK_SIGNALS) do
+            local ok = pcall(function() firesignal(b[sig]) end)
+            any = any or ok
+        end
+        if any then return "firesignal" end
+    end
+    if getconnections then
+        local seen, n = {}, 0
+        for _, sig in ipairs(CLICK_SIGNALS) do
+            local okC, conns = pcall(getconnections, b[sig])
+            if okC and type(conns) == "table" then
+                for _, c in ipairs(conns) do
+                    local fn = c.Function
+                    if not (fn and seen[fn]) then
+                        if fn then seen[fn] = true end
+                        if c.Fire and pcall(function() c:Fire() end) then n = n + 1 end
+                    end
+                end
+            end
+        end
+        if n > 0 then return "getconnections" end
+    end
+    return NV.virtualClick(b)
+end
+
+function NV.press(pats, wide)
+    local g = NV.gui()
+    if not g then return false end
+    local key = table.concat(pats, "|")
+    local now = os.clock()
+    local last = NV.lastPress[key]
+    if last and now - last < 0.6 then return true end -- anti klik ganda
+    local list = NV.candidates(pats, wide)
+    for i = 1, math.min(#list, 3) do
+        local how = NV.fire(list[i].b)
+        if how then
+            NV.lastPress[key] = now
+            logLine("Tombol asli '" .. list[i].name .. "' ditekan (" .. how .. ")", "info")
+            return true
+        end
+    end
+    return false
+end
+
+-- tulis semua GuiObject StudioGui ke file (buat diagnosa: nama asli tombol Play / Pause / Stop)
+function NV.dumpFile()
+    local g = NV.gui()
+    if not g or not writefile then return false end
+    local lines = { "StudioGui dump " .. os.date("%Y-%m-%d %H:%M:%S"), "Enabled=" .. tostring(g.Enabled) .. " DisplayOrder=" .. tostring(g.DisplayOrder), "" }
+    for _, d in ipairs(g:GetDescendants()) do
+        if d:IsA("GuiObject") then
+            local txt = ""
+            if d:IsA("TextButton") or d:IsA("TextLabel") or d:IsA("TextBox") then pcall(function() txt = d.Text end) end
+            local path = d:GetFullName()
+            path = path:gsub("^.-StudioGui", "StudioGui")
+            lines[#lines + 1] = string.format("%s [%s] vis=%s text=%q", path, d.ClassName, tostring(d.Visible), txt)
+            if #lines > 4000 then break end
+        end
+    end
+    pcall(ensureFolder)
+    return (pcall(writefile, CONFIG.Folder .. "/native_ui_dump.txt", table.concat(lines, "\n")))
+end
+
+function NV.report()
+    if NV.reported and os.clock() - NV.reported < 10 then return end
+    NV.reported = os.clock()
+    pcall(NV.dump)
+    pcall(NV.dumpFile)
+end
+
+NV.TP = {
+    play = { narrow = { "^play", "^run$", "playbutton" }, broad = { "^play", "play$", "[_%-%s]play", "playbtn", "^run" } },
+    pause = { narrow = { "^pause" }, broad = { "pause", "^resume" } },
+    stop = { narrow = { "^stop" }, broad = { "stop$", "[_%-%s]stop", "stopbtn", "^halt" } },
+}
+
+function NV.transport(kind)
+    local tp = NV.TP[kind]
+    if not tp then return false end
+    local ok = NV.press(tp.narrow, false) or NV.press(tp.broad, true)
+    if ok then
+        if kind == "play" then ST.playing = true elseif kind == "stop" then ST.playing = false end
+        setStatus(kind == "play" and "Play dikirim ke Studio Lite..." or (kind == "pause" and "Pause dikirim." or "Stop dikirim."), "ok")
+    else
+        NV.report()
+        notify("Tombol " .. kind .. " asli tidak ditemukan. Daftar tombol ada di Output dan StudioLiteImports/native_ui_dump.txt.", "warn")
+    end
+    return ok
 end
 
 function NV.close()
@@ -10708,6 +11125,11 @@ local function numericPrompt(kind)
     end
 end
 
+function ACT.insertScript(class)
+    local inst = ACT.insert(class, parentForInsert())
+    if inst and inst:IsA("LuaSourceContainer") then ACT.openEditor(inst) end
+end
+
 local function insertBtn(class, text, parentFn)
     return { text = text or class, icon = classIcon(class), fn = function() ACT.insert(class, parentFn and parentFn() or parentForInsert()) end }
 end
@@ -10733,9 +11155,9 @@ end
 function RB.defs()
     local test = {
         name = "Test", cols = {
-            { big = true, text = "Play", icon = glyph("play"), fn = function() if not NV.press({ "^play", "^run$", "playbutton" }) then notify("Tombol Play asli tidak ditemukan.", "warn") end end },
-            { big = true, text = "Pause", icon = glyph("pause"), fn = function() if not NV.press({ "^pause" }) then notify("Tombol Pause asli tidak ditemukan.", "warn") end end },
-            { big = true, text = "Stop", icon = glyph("stop"), fn = function() if not NV.press({ "^stop" }) then notify("Tombol Stop asli tidak ditemukan.", "warn") end end },
+            { big = true, text = "Play", icon = glyph("play"), fn = function() NV.transport("play") end },
+            { big = true, text = "Pause", icon = glyph("pause"), fn = function() NV.transport("pause") end },
+            { big = true, text = "Stop", icon = glyph("stop"), fn = function() NV.transport("stop") end },
         },
     }
     local defs = {}
@@ -10808,9 +11230,10 @@ function RB.defs()
             guiCol({ "UICorner", "UIStroke", "UIGradient" }) } },
     }
     defs.SCRIPT = {
-        { name = "Insert", cols = { { big = true, text = "Script", icon = classIcon("Script"), fn = function() ACT.insert("Script", parentForInsert()) end },
-            { big = true, text = "LocalScript", icon = classIcon("LocalScript"), fn = function() ACT.insert("LocalScript", parentForInsert()) end },
-            { big = true, text = "ModuleScript", icon = classIcon("ModuleScript"), fn = function() ACT.insert("ModuleScript", parentForInsert()) end } } },
+        { name = "Insert", cols = { { big = true, text = "Script", icon = classIcon("Script"), fn = function() ACT.insertScript("Script") end },
+            { big = true, text = "LocalScript", icon = classIcon("LocalScript"), fn = function() ACT.insertScript("LocalScript") end },
+            { big = true, text = "ModuleScript", icon = classIcon("ModuleScript"), fn = function() ACT.insertScript("ModuleScript") end },
+            { big = true, text = "Edit Script", icon = classIcon("Script"), fn = function() ACT.openSelectedScript() end } } },
         { name = "Library", cols = { { big = true, text = "Script Library", icon = glyph("list"), fn = function() NV.open("InsertScriptFrame", { "insertscript", "^script" }) end },
             { big = true, text = "Catalog", icon = glyph("window"), fn = function() NV.open("CatalogSearchFrame", { "catalog" }) end } } },
         { name = "Run", cols = { { big = true, text = "Command Bar", icon = glyph("term"), fn = function() RB.togglePanel("cmd") end, on = function() return SS.cmd end },
@@ -11500,6 +11923,137 @@ end
 -- ---------------------------------------------------------------
 -- Start
 -- ---------------------------------------------------------------
+-- ---------------------------------------------------------------
+-- v7: StarterGui preview. ScreenGui di StarterGui tidak tampil sendiri saat mode edit, jadi dibuat klon (tanpa script)
+-- di PlayerGui dan disinkronkan. Dimatikan selama ST.playing (Play asli yang menyalin StarterGui sendiri).
+-- ---------------------------------------------------------------
+do
+    local SG = game:GetService("StarterGui")
+    local PRE = "SLPreview_"
+    local P = { map = {}, dirty = {}, conns = {}, hooked = setmetatable({}, { __mode = "k" }) }
+    ST.sgp = P
+
+    local function stripScripts(root)
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("LuaSourceContainer") then pcall(function() d:Destroy() end) end
+        end
+    end
+
+    local function makeClone(c)
+        local okC, cl = pcall(function() return c:Clone() end)
+        if not okC or not cl then return nil end
+        stripScripts(cl)
+        cl.Name = PRE .. c.Name
+        pcall(function() cl.ResetOnSpawn = false end)
+        pcall(function() cl.Archivable = false end)
+        return cl
+    end
+
+    local function hook(c)
+        if P.hooked[c] then return end
+        P.hooked[c] = true
+        local key = c:IsA("ScreenGui") and c or "__loose"
+        local function m() P.dirty[key] = true end
+        local function ignore(d)
+            return d:IsA("LuaSourceContainer") or d:FindFirstAncestorWhichIsA("LuaSourceContainer") ~= nil
+        end
+        local function hookOne(d)
+            if ignore(d) then return end
+            P.conns[#P.conns + 1] = d.Changed:Connect(m)
+        end
+        hookOne(c)
+        for _, d in ipairs(c:GetDescendants()) do hookOne(d) end
+        P.conns[#P.conns + 1] = c.DescendantAdded:Connect(function(d)
+            if ignore(d) then return end
+            hookOne(d)
+            m()
+        end)
+        P.conns[#P.conns + 1] = c.DescendantRemoving:Connect(function(d)
+            if not d:IsA("LuaSourceContainer") then m() end
+        end)
+    end
+
+    local function destroyAll()
+        for k, cl in pairs(P.map) do
+            pcall(function() cl:Destroy() end)
+            P.map[k] = nil
+        end
+    end
+
+    local function sync()
+        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return end
+        if ST.playing then
+            destroyAll()
+            return
+        end
+        local live, loose = {}, {}
+        for _, c in ipairs(SG:GetChildren()) do
+            if c:IsA("ScreenGui") then
+                live[c] = true
+                local cl = P.map[c]
+                if P.dirty[c] or not cl or not cl.Parent then
+                    if cl then pcall(function() cl:Destroy() end) end
+                    P.dirty[c] = nil
+                    local nc = makeClone(c)
+                    if nc then nc.Parent = pg end
+                    P.map[c] = nc
+                    hook(c)
+                end
+            elseif c:IsA("GuiObject") then
+                loose[#loose + 1] = c
+            end
+        end
+        if #loose > 0 then
+            local cl = P.map.__loose
+            if P.dirty.__loose or not cl or not cl.Parent then
+                if cl then pcall(function() cl:Destroy() end) end
+                P.dirty.__loose = nil
+                local host = Instance.new("ScreenGui")
+                host.Name = PRE .. "Loose"
+                host.ResetOnSpawn = false
+                for _, c in ipairs(loose) do
+                    local nc = makeClone(c)
+                    if nc then nc.Parent = host end
+                    hook(c)
+                end
+                pcall(function() host.Archivable = false end)
+                host.Parent = pg
+                P.map.__loose = host
+            end
+        elseif P.map.__loose then
+            pcall(function() P.map.__loose:Destroy() end)
+            P.map.__loose = nil
+        end
+        for k, cl in pairs(P.map) do
+            if k ~= "__loose" and not live[k] then
+                pcall(function() cl:Destroy() end)
+                P.map[k] = nil
+            end
+        end
+    end
+
+    local token = {}
+    P.token = token
+    task.spawn(function()
+        while alive() and P.token == token do
+            local ok, err = pcall(sync)
+            if not ok and not P.errShown then
+                P.errShown = true
+                logLine("StarterGui preview: " .. tostring(err), "warn")
+            end
+            task.wait(0.35)
+        end
+        destroyAll()
+    end)
+
+    table.insert(E.onShutdown, function()
+        P.token = nil
+        destroyAll()
+        for _, c in ipairs(P.conns) do pcall(function() c:Disconnect() end) end
+    end)
+end
+
 table.insert(E.onShutdown, function() shutdown(true) end)
 startListeners()
 build()
