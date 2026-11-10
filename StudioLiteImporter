@@ -1,5 +1,5 @@
 --[[
-    Studio Lite Importer v6 + Studio Editor  (Delta executor)
+    Studio Lite Importer v8 + Studio Editor  (Delta executor)
     Target : Studio Lite (Roblox experience by ScottSpiritWalker, PlaceId 10959918411)
 
     Cara pakai
@@ -24,6 +24,13 @@
       - Alat Geser / Putar / Skala dengan gizmo Handles (global / lokal, snap), mirip Roblox Studio.
       - Plugin: kode Lua di folder StudioLiteImports/plugins dengan API SL (seleksi, operasi, alat,
         import, Toolbox, penyimpanan, UI sendiri). Dimatikan sampai kamu aktifkan.
+
+    Baru di v8 (perbaikan dari v7)
+      - UI asli Studio Lite sekarang disembunyikan paksa: semua ScreenGui native dimatikan, DisplayOrder-nya diturunkan,
+        dan dikunci (kalau game menyalakan lagi langsung dimatikan lagi). Daftar GUI di PlayerGui dicatat di Output.
+      - Editor script tidak lagi modal besar 780x560: sekarang docked di area tengah seperti Roblox Studio
+        (tab dokumen, nomor baris, warna sintaks, status Ln/Col). Tombol Size ganti tinggi 100% / 60% / 35%.
+      - SL_CodeTextBox di dalam Script itu TextBox penyimpan source bawaan Studio Lite (bukan ScreenGui); aman.
 
     Catatan
       - Objek dibuat di sisi client; Save Studio Lite membaca workspace lokal.
@@ -6519,6 +6526,7 @@ local DEFAULTS = {
     rw = 280, lw = 270, bh = 170, exFrac = 0.46, propSplit = 0.46,
     ex = true, pr = true, tb = false, out = false, cmd = false,
     tab = "HOME", ribbonCollapsed = false, stats = false, expandSelect = true,
+    edFrac = 0.6, edFont = 14, edHi = true,
 }
 for k, v in pairs(DEFAULTS) do if SS[k] == nil then SS[k] = v end end
 -- SS.uiScale: nil = otomatis (menyesuaikan tinggi layar), angka = skala tetap
@@ -8890,58 +8898,570 @@ function ACT.writeSource(inst, text)
     return true
 end
 
-function ACT.openEditor(inst)
-    if typeof(inst) ~= "Instance" or not inst:IsA("LuaSourceContainer") then
-        notify("Pilih Script / LocalScript / ModuleScript dulu.", "warn")
-        return
-    end
-    local okH, whyH = ACT.ensureScriptHolder(inst, ACT.TEMPLATES[inst.ClassName] or "")
-    if not okH then notify("Editor script: " .. tostring(whyH), "warn") end
-    local text = ACT.readSource(inst)
-    local M = UI.modal(780, 560, inst.ClassName .. ": " .. inst.Name)
-    local body = M.body
-    local bar = frame(body, { Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = T.panelHead })
-    local info = lbl(bar, { Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -250, 1, 0), Text = inst:GetFullName(),
-        TextColor3 = T.textDim, TextTruncate = Enum.TextTruncate.AtEnd, TextSize = 12 })
-    local bSave = UI.pillButton(bar, "Save", true, { Position = U2(1, -240, 0, 4), Size = UDim2.fromOffset(66, 28) })
-    local bBig = UI.pillButton(bar, "A+", false, { Position = U2(1, -168, 0, 4), Size = UDim2.fromOffset(40, 28) })
-    local bSmall = UI.pillButton(bar, "A-", false, { Position = U2(1, -124, 0, 4), Size = UDim2.fromOffset(40, 28) })
-    local bWrap = UI.pillButton(bar, "Wrap", false, { Position = U2(1, -80, 0, 4), Size = UDim2.fromOffset(72, 28) })
-    local sf = new("ScrollingFrame", { Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 1, -36), BackgroundColor3 = T.input,
-        BorderSizePixel = 0, ScrollBarThickness = 8, ScrollBarImageColor3 = T.lineStrong,
-        ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new() }, body)
-    local tb = new("TextBox", { Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1, Text = text, ClearTextOnFocus = false, MultiLine = true, TextEditable = true, Active = true,
-        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Font = MONO, TextSize = 14,
-        TextColor3 = T.text, TextWrapped = true, BorderSizePixel = 0 }, sf)
-    pad(tb, 8, 8, 6, 6)
+-- ===================================================================
+-- v8: Editor script docked seperti Roblox Studio (bukan modal 780x560 yang menutup semua panel)
+--   - menempel di area tengah (di antara Toolbox & Explorer/Properties, di atas Output)
+--   - tab dokumen (banyak script terbuka sekaligus), nomor baris, warna sintaks, status Ln/Col
+--   - tombol: Save, A-, A+, Wrap, Color, Size (100% / 60% / 35% tinggi), x
+-- Semua state ada di ACT.ed supaya tidak menambah variabel local di level atas (batas 200 local).
+-- ===================================================================
+do
+    local KW = {}
+    for w in ("and break do else elseif end for function if in local not or repeat return then until while continue true false nil"):gmatch("%S+") do KW[w] = true end
+    local BI = {}
+    for w in ("game workspace script self print warn error pairs ipairs next type typeof tostring tonumber require pcall xpcall select assert setmetatable getmetatable rawget rawset rawequal rawlen unpack task math string table os coroutine utf8 bit32 debug Instance Vector3 Vector2 CFrame Color3 BrickColor UDim UDim2 Enum TweenInfo Ray Random Region3 NumberRange NumberSequence ColorSequence Rect Font wait spawn delay tick time shared _G _VERSION Drawing getgenv getrenv getfenv setfenv loadstring"):gmatch("%S+") do BI[w] = true end
 
-    local latest, pending = text, false
-    local function save()
-        pending = false
-        local okW, whyW = ACT.writeSource(inst, latest)
-        info.Text = okW and ("Tersimpan  |  " .. inst:GetFullName()) or ("Gagal menyimpan: " .. tostring(whyW))
-        info.TextColor3 = okW and T.ok or T.err
+    local PAL = {
+        dark = { kw = "#F86D7C", str = "#ADF195", num = "#FFC600", com = "#7F8793", bi = "#84D6F7" },
+        light = { kw = "#0033CC", str = "#A31515", num = "#098658", com = "#2E8B3A", bi = "#267F99" },
+    }
+    local ESC = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;", ['"'] = "&quot;", ["'"] = "&apos;" }
+    local function escRT(s) return (s:gsub("[&<>\"']", ESC)) end
+
+    -- Pewarna sintaks Luau -> string RichText. Dipanggil lewat pcall; kalau gagal editor jatuh ke teks polos.
+    function ACT.highlight(src)
+        local pal = PAL[T.name == "dark" and "dark" or "light"]
+        local out, n = {}, 0
+        local len = #src
+        local i = 1
+        local function put(s, col)
+            if s == "" then return end
+            n = n + 1
+            if col then out[n] = '<font color="' .. col .. '">' .. escRT(s) .. "</font>"
+            else out[n] = escRT(s) end
+        end
+        while i <= len do
+            local c = src:sub(i, i)
+            if c == "-" and src:sub(i + 1, i + 1) == "-" then
+                local eq = src:match("^%-%-%[(=*)%[", i)
+                local e
+                if eq then
+                    local _, ce = src:find("]" .. eq .. "]", i + 4 + #eq, true)
+                    e = ce or len
+                else
+                    local nl = src:find("\n", i, true)
+                    e = nl and (nl - 1) or len
+                end
+                put(src:sub(i, e), pal.com)
+                i = e + 1
+            elseif c == '"' or c == "'" or c == "`" then
+                local j = i + 1
+                while j <= len do
+                    local d = src:sub(j, j)
+                    if d == "\\" then j = j + 2
+                    elseif d == c or d == "\n" then break
+                    else j = j + 1 end
+                end
+                local e
+                if j <= len and src:sub(j, j) == c then e = j else e = math.min(j - 1, len) end
+                put(src:sub(i, e), pal.str)
+                i = e + 1
+            elseif c == "[" and src:match("^%[=*%[", i) then
+                local eq = src:match("^%[(=*)%[", i)
+                local _, ce = src:find("]" .. eq .. "]", i + 2 + #eq, true)
+                local e = ce or len
+                put(src:sub(i, e), pal.str)
+                i = e + 1
+            elseif c:match("%d") or (c == "." and src:sub(i + 1, i + 1):match("%d")) then
+                local s = src:match("^0[xX][%x_]+", i) or src:match("^0[bB][01_]+", i)
+                    or src:match("^%d[%d_]*%.?[%d_]*[eE][%+%-]?%d+", i) or src:match("^%d[%d_]*%.?[%d_]*", i)
+                    or src:match("^%.%d+", i) or c
+                put(s, pal.num)
+                i = i + #s
+            elseif c:match("[%a_]") then
+                local w = src:match("^[%a_][%w_]*", i)
+                local col
+                if KW[w] then col = pal.kw
+                elseif BI[w] then
+                    col = pal.bi
+                    local pc = (i > 1) and src:sub(i - 1, i - 1) or ""
+                    if pc == "." or pc == ":" then col = nil end -- properti / method, bukan global
+                end
+                put(w, col)
+                i = i + #w
+            else
+                local s = src:match("^[^%a_%d\"'`%-%[%.]+", i)
+                if not s then s = c end
+                put(s, nil)
+                i = i + #s
+            end
+        end
+        return table.concat(out)
     end
-    on(tb:GetPropertyChangedSignal("Text"), function()
-        latest = tb.Text
-        if pending then return end
-        pending = true
-        task.delay(0.5, function() if pending then save() end end)
-    end)
-    on(tb.FocusLost, function() latest = tb.Text save() end)
-    on(bSave.MouseButton1Click, function() latest = tb.Text save() end)
-    on(bBig.MouseButton1Click, function() tb.TextSize = math.clamp(tb.TextSize + 2, 10, 30) end)
-    on(bSmall.MouseButton1Click, function() tb.TextSize = math.clamp(tb.TextSize - 2, 10, 30) end)
-    local wrapped = true
-    on(bWrap.MouseButton1Click, function()
-        wrapped = not wrapped
-        tb.TextWrapped = wrapped
-        tb.AutomaticSize = wrapped and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
-        sf.AutomaticCanvasSize = wrapped and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
-        sf.ScrollingDirection = wrapped and Enum.ScrollingDirection.Y or Enum.ScrollingDirection.XY
-    end)
-    return M
+
+    local function lineNums(n)
+        local t = {}
+        for k = 1, n do t[k] = tostring(k) end
+        return table.concat(t, "\n")
+    end
+
+    local function setPill(b, state)
+        b.BackgroundColor3 = state and T.accent or T.panelHead
+        local l = b:FindFirstChildOfClass("TextLabel")
+        if l then l.TextColor3 = state and T.accentText or T.text end
+    end
+
+    local HEAD_H, FOOT_H = 28, 18
+
+    function ACT.edReset()
+        local ed = ACT.ed
+        if ed then
+            pcall(ed.saveNow)
+            for _, t in ipairs(ed.tabs) do
+                if t.conn then pcall(function() t.conn:Disconnect() end) end
+                if t.nameConn then pcall(function() t.nameConn:Disconnect() end) end
+            end
+        end
+        ACT.ed = nil
+    end
+
+    function ACT.edLayout(x, y, w, hFull)
+        local ed = ACT.ed
+        if not ed or not ed.frame or not ed.frame.Parent then return end
+        if not ed.open then ed.frame.Visible = false return end
+        local frac = SS.edFrac or 0.6
+        local h = math.min(hFull, math.max(140, math.floor(hFull * frac)))
+        ed.frame.Visible = true
+        ed.frame.Position = UDim2.fromOffset(x, y)
+        ed.frame.Size = UDim2.fromOffset(math.max(120, w), h)
+        ed.fit()
+    end
+
+    function ACT.edEnsure()
+        if ACT.ed and ACT.ed.frame and ACT.ed.frame.Parent then return ACT.ed end
+        local ed = { tabs = {}, active = 0, open = false, hlTok = 0, saveTok = 0, lines = 0, gutW = 36,
+            size = math.clamp(SS.edFont or 14, 10, 32), wrap = false, hlActive = false, lineH = 16 }
+        ACT.ed = ed
+
+        local f = frame(UI.frame, { Name = "ScriptEditor", BackgroundColor3 = T.input, Active = true, ZIndex = 4,
+            ClipsDescendants = true, Visible = false })
+        stroke(f, T.lineStrong, 1)
+        ed.frame = f
+
+        -- ---------- header: tab dokumen + tombol ----------
+        local head = frame(f, { Name = "Head", Size = U2(1, 0, 0, HEAD_H), BackgroundColor3 = T.panelHead })
+        frame(head, { Position = U2(0, 0, 1, -1), Size = U2(1, 0, 0, 1), BackgroundColor3 = T.line })
+        local specs = { { "Save", 46 }, { "A-", 28 }, { "A+", 28 }, { "Wrap", 42 }, { "Color", 46 }, { "Size", 38 }, { "x", 24 } }
+        local total = 0
+        for _, s in ipairs(specs) do total = total + s[2] + 3 end
+        local cluster = new("Frame", { AnchorPoint = V2(1, 0), Position = U2(1, -4, 0, 2), Size = UDim2.fromOffset(total, 24),
+            BackgroundTransparency = 1 }, head)
+        local pills, px = {}, 0
+        for _, s in ipairs(specs) do
+            pills[s[1]] = UI.pillButton(cluster, s[1], false, { Position = UDim2.fromOffset(px, 0), Size = UDim2.fromOffset(s[2], 24) })
+            px = px + s[2] + 3
+        end
+        local tabsF = new("ScrollingFrame", { Name = "Tabs", Size = U2(1, -(total + 10), 1, -1), BackgroundTransparency = 1,
+            BorderSizePixel = 0, ScrollBarThickness = 0, ScrollingDirection = Enum.ScrollingDirection.X,
+            AutomaticCanvasSize = Enum.AutomaticSize.X, CanvasSize = UDim2.new() }, head)
+
+        -- ---------- footer: Ln/Col + path ----------
+        local foot = frame(f, { Name = "Foot", AnchorPoint = V2(0, 1), Position = U2(0, 0, 1, 0), Size = U2(1, 0, 0, FOOT_H),
+            BackgroundColor3 = T.panelHead })
+        frame(foot, { Size = U2(1, 0, 0, 1), BackgroundColor3 = T.line })
+        local posL = lbl(foot, { Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(150, FOOT_H), TextSize = 12, TextColor3 = T.textDim })
+        local infoL = lbl(foot, { AnchorPoint = V2(1, 0), Position = U2(1, -8, 0, 0), Size = U2(1, -170, 1, 0), TextSize = 12,
+            TextColor3 = T.textDim, TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd })
+
+        -- ---------- gutter nomor baris + area kode ----------
+        local gut = frame(f, { Name = "Gutter", Position = UDim2.fromOffset(0, HEAD_H), Size = U2(0, ed.gutW, 1, -(HEAD_H + FOOT_H)),
+            BackgroundColor3 = T.panel, ClipsDescendants = true })
+        frame(gut, { AnchorPoint = V2(1, 0), Position = U2(1, 0, 0, 0), Size = U2(0, 1, 1, 0), BackgroundColor3 = T.line })
+        local gl = lbl(gut, { Name = "Nums", Size = U2(1, -8, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Font = MONO,
+            TextSize = ed.size, TextColor3 = T.textDim, TextXAlignment = Enum.TextXAlignment.Right,
+            TextYAlignment = Enum.TextYAlignment.Top, Text = "1" })
+        local sf = new("ScrollingFrame", { Name = "Code", Position = UDim2.fromOffset(ed.gutW + 1, HEAD_H),
+            Size = U2(1, -(ed.gutW + 1), 1, -(HEAD_H + FOOT_H)), BackgroundColor3 = T.input, BorderSizePixel = 0,
+            ScrollBarThickness = 8, ScrollBarImageColor3 = T.lineStrong, ScrollingDirection = Enum.ScrollingDirection.XY,
+            AutomaticCanvasSize = Enum.AutomaticSize.XY, CanvasSize = UDim2.new(),
+            ElasticBehavior = Enum.ElasticBehavior.Never }, f)
+        local tb = new("TextBox", { Name = "Box", Position = UDim2.fromOffset(6, 0), Size = UDim2.fromOffset(200, 200),
+            AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1, Text = "", ClearTextOnFocus = false,
+            MultiLine = true, TextEditable = true, Active = true, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, Font = MONO, TextSize = ed.size, TextColor3 = T.text,
+            TextWrapped = false, BorderSizePixel = 0, ZIndex = 1 }, sf)
+        -- lapisan warna: TextLabel RichText tepat di atas TextBox (teks TextBox disembunyikan saat warna aktif)
+        local hl = new("TextLabel", { Name = "Colors", Position = UDim2.fromOffset(6, 0), Size = UDim2.fromOffset(200, 200),
+            BackgroundTransparency = 1, RichText = true, Text = "", Font = MONO, TextSize = ed.size, TextColor3 = T.text,
+            TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = false,
+            BorderSizePixel = 0, ZIndex = 2, Active = false, Visible = false }, sf)
+        pcall(function() hl.Interactable = false end)
+        -- caret buatan: saat TextTransparency = 1 caret asli bisa ikut hilang
+        local caret = new("Frame", { Name = "Caret", Size = UDim2.fromOffset(2, 16), BackgroundColor3 = T.text,
+            BorderSizePixel = 0, ZIndex = 3, Active = false, Visible = false }, sf)
+        ed.tb, ed.sf, ed.hl, ed.gut, ed.gl = tb, sf, hl, gut, gl
+
+        -- ---------- util ----------
+        function ed.measure()
+            local ok, sz = pcall(function() return TextService:GetTextSize("Ag", ed.size, MONO, V2(1e6, 1e6)) end)
+            ed.lineH = (ok and sz and sz.Y > 0) and sz.Y or math.floor(ed.size * 1.25)
+        end
+
+        function ed.placeCode()
+            local gw = ed.wrap and 0 or ed.gutW
+            gut.Visible = not ed.wrap
+            gut.Size = U2(0, ed.gutW, 1, -(HEAD_H + FOOT_H))
+            sf.Position = UDim2.fromOffset(gw > 0 and (gw + 1) or 0, HEAD_H)
+            sf.Size = U2(1, -(gw > 0 and (gw + 1) or 0), 1, -(HEAD_H + FOOT_H))
+        end
+
+        function ed.syncHl()
+            local ab = tb.AbsoluteSize
+            hl.Size = UDim2.fromOffset(ab.X / UI.sc, ab.Y / UI.sc)
+        end
+
+        function ed.fit()
+            local ab = sf.AbsoluteSize
+            local vw = math.max(40, ab.X / UI.sc - 14)
+            local vh = math.max(40, ab.Y / UI.sc - 4)
+            tb.AutomaticSize = ed.wrap and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
+            tb.Size = UDim2.fromOffset(vw - 6, vh)
+            ed.syncHl()
+        end
+
+        function ed.setInfo()
+            local t = ed.tabs[ed.active]
+            if not t then return end
+            local bad = ed.statusOk == false
+            infoL.Text = (ed.status and (ed.status .. "  |  ") or "") .. t.inst:GetFullName()
+            infoL.TextColor3 = bad and T.err or (ed.statusOk and T.ok or T.textDim)
+        end
+
+        function ed.updatePos()
+            local cp = tb.CursorPosition
+            if cp < 1 then posL.Text = "" return end
+            local before = tb.Text:sub(1, cp - 1)
+            local ls = before:match(".*\n()") or 1
+            local line = select(2, before:gsub("\n", "\n")) + 1
+            posL.Text = string.format("Ln %d, Col %d", line, #before - ls + 2)
+        end
+
+        -- caret buatan + auto-scroll ke caret (hanya mode tanpa wrap; di mode wrap TextBox asli yang dipakai)
+        function ed.updateCaret(scroll)
+            if ed.wrap then caret.Visible = false return end
+            local cp = tb.CursorPosition
+            if cp < 1 then caret.Visible = false return end
+            local before = tb.Text:sub(1, cp - 1)
+            local ls = before:match(".*\n()") or 1
+            local lineText = before:sub(ls)
+            local line = select(2, before:gsub("\n", "\n"))
+            local x = 0
+            if lineText ~= "" then
+                local ok, sz = pcall(function() return TextService:GetTextSize(lineText, ed.size, MONO, V2(1e6, 1e6)) end)
+                if ok and sz then x = sz.X else x = #lineText * ed.size * 0.6 end
+            end
+            local y = line * ed.lineH
+            local cx = 6 + x
+            caret.Position = UDim2.fromOffset(cx, y)
+            caret.Size = UDim2.fromOffset(2, ed.lineH)
+            caret.Visible = ed.hlActive and tb:IsFocused()
+            if scroll and tb:IsFocused() then
+                local cpos = sf.CanvasPosition
+                local ab = sf.AbsoluteSize
+                local vw, vh = ab.X / UI.sc - 14, ab.Y / UI.sc
+                local nx, ny = cpos.X, cpos.Y
+                if y < ny then ny = y
+                elseif y + ed.lineH > ny + vh - 10 then ny = y + ed.lineH - vh + 10 end
+                if cx < nx then nx = math.max(0, cx - 40)
+                elseif cx + 4 > nx + vw then nx = cx + 4 - vw + 40 end
+                if nx ~= cpos.X or ny ~= cpos.Y then sf.CanvasPosition = V2(math.max(0, nx), math.max(0, ny)) end
+            end
+        end
+
+        function ed.refreshGutter()
+            local n = select(2, tb.Text:gsub("\n", "\n")) + 1
+            if n == ed.lines then return end
+            ed.lines = n
+            gl.Text = lineNums(n)
+            local gw = math.max(32, #tostring(n) * math.floor(ed.size * 0.62) + 16)
+            if gw ~= ed.gutW then ed.gutW = gw ed.placeCode() ed.fit() end
+        end
+
+        function ed.render()
+            local text = tb.Text
+            local want = SS.edHi ~= false and not ed.wrap and #text <= 40000
+            if want then
+                local ok, rt = pcall(ACT.highlight, text)
+                if ok and type(rt) == "string" and #rt < 190000 then
+                    hl.Text = rt
+                    hl.Visible = true
+                    tb.TextTransparency = 1
+                    ed.hlActive = true
+                    ed.syncHl()
+                    ed.updateCaret(false)
+                    return
+                end
+            end
+            hl.Visible = false
+            tb.TextTransparency = 0
+            ed.hlActive = false
+            caret.Visible = false
+        end
+
+        function ed.scheduleRender()
+            if #tb.Text <= 6000 then ed.render() return end
+            if hl.Visible then hl.Text = escRT(tb.Text) end -- sementara polos agar tidak tertinggal saat mengetik
+            ed.hlTok = ed.hlTok + 1
+            local tok = ed.hlTok
+            task.delay(0.18, function()
+                if ed.hlTok == tok and f.Parent then ed.render() end
+            end)
+        end
+
+        function ed.paintTabs()
+            for i, t in ipairs(ed.tabs) do
+                if t.ui then
+                    local act = i == ed.active
+                    t.ui.b.BackgroundColor3 = act and T.input or T.panel
+                    t.ui.l.Text = (t.dirty and "* " or "") .. t.inst.Name
+                    t.ui.l.TextColor3 = act and T.text or T.textDim
+                end
+            end
+        end
+
+        function ed.drawTabs()
+            for _, c in ipairs(tabsF:GetChildren()) do
+                if c:IsA("GuiObject") then c:Destroy() end
+            end
+            local x = 4
+            for i, t in ipairs(ed.tabs) do
+                local name = t.inst.Name
+                local w = math.clamp(textWidth(name, 13) + 44, 84, 220)
+                local b = btn(tabsF, { Name = "Tab" .. i, Position = UDim2.fromOffset(x, 3), Size = UDim2.fromOffset(w, 25),
+                    BackgroundTransparency = 0, BackgroundColor3 = T.panel })
+                corner(b, 4)
+                local l = lbl(b, { Position = UDim2.fromOffset(8, 0), Size = U2(1, -32, 1, 0), Text = name, TextSize = 13,
+                    TextTruncate = Enum.TextTruncate.AtEnd })
+                local xb = btn(b, { Position = U2(1, -24, 0, 2), Size = UDim2.fromOffset(20, 21) })
+                lbl(xb, { Size = U2(1, 0, 1, 0), Text = "x", TextXAlignment = Enum.TextXAlignment.Center, TextSize = 14, TextColor3 = T.textDim })
+                t.ui = { b = b, l = l }
+                on(b.MouseButton1Click, function()
+                    for j, tt in ipairs(ed.tabs) do if tt == t then ed.select(j) break end end
+                end)
+                on(xb.MouseButton1Click, function()
+                    for j, tt in ipairs(ed.tabs) do if tt == t then ed.closeTab(j) break end end
+                end)
+                x = x + w + 3
+            end
+            ed.paintTabs()
+        end
+
+        function ed.saveNow()
+            local t = ed.tabs[ed.active]
+            if not t or t.dead then return end
+            if not t.dirty and not ed.force then return end
+            t.dirty = false
+            local ok, why = ACT.writeSource(t.inst, t.text)
+            if ok then ed.status, ed.statusOk = "Tersimpan", true
+            else ed.status, ed.statusOk, t.dirty = "Gagal menyimpan: " .. tostring(why), false, true end
+            ed.setInfo()
+            ed.paintTabs()
+        end
+
+        function ed.scheduleSave()
+            ed.saveTok = ed.saveTok + 1
+            local tok = ed.saveTok
+            task.delay(0.6, function()
+                if ed.saveTok == tok and f.Parent then ed.saveNow() end
+            end)
+        end
+
+        function ed.select(i)
+            if i < 1 or i > #ed.tabs then return end
+            ed.saveNow()
+            ed.active = i
+            local t = ed.tabs[i]
+            ed.loading = true
+            tb.Text = t.text
+            ed.loading = false
+            sf.CanvasPosition = V2(0, 0)
+            ed.status, ed.statusOk = nil, nil
+            ed.lines = 0
+            ed.refreshGutter()
+            ed.render()
+            ed.paintTabs()
+            ed.setInfo()
+            ed.updatePos()
+        end
+
+        function ed.hide()
+            ed.open = false
+            f.Visible = false
+            if ACT.relayout then ACT.relayout() end
+        end
+
+        function ed.show()
+            ed.open = true
+            f.Visible = true
+            if ACT.relayout then ACT.relayout() end
+        end
+
+        function ed.closeTab(i)
+            local t = ed.tabs[i]
+            if not t then return end
+            if i == ed.active then ed.saveNow() end
+            if t.conn then pcall(function() t.conn:Disconnect() end) end
+            if t.nameConn then pcall(function() t.nameConn:Disconnect() end) end
+            table.remove(ed.tabs, i)
+            if #ed.tabs == 0 then
+                ed.active = 0
+                ed.loading = true
+                tb.Text = ""
+                ed.loading = false
+                ed.drawTabs()
+                ed.hide()
+                return
+            end
+            local ni = ed.active
+            if i < ed.active then ni = ed.active - 1 end
+            ni = math.min(math.max(ni, 1), #ed.tabs)
+            ed.active = 0
+            ed.drawTabs()
+            ed.select(ni)
+        end
+
+        function ed.closeAll()
+            ed.saveNow()
+            for i = #ed.tabs, 1, -1 do
+                local t = ed.tabs[i]
+                if t.conn then pcall(function() t.conn:Disconnect() end) end
+                if t.nameConn then pcall(function() t.nameConn:Disconnect() end) end
+                ed.tabs[i] = nil
+            end
+            ed.active = 0
+            ed.drawTabs()
+            ed.hide()
+        end
+
+        function ed.setSize(n)
+            ed.size = math.clamp(n, 10, 32)
+            SS.edFont = ed.size
+            saveSS()
+            tb.TextSize, hl.TextSize, gl.TextSize = ed.size, ed.size, ed.size
+            ed.measure()
+            ed.lines = 0
+            ed.refreshGutter()
+            ed.fit()
+            ed.render()
+        end
+
+        function ed.applyWrap()
+            tb.TextWrapped = ed.wrap
+            sf.AutomaticCanvasSize = ed.wrap and Enum.AutomaticSize.Y or Enum.AutomaticSize.XY
+            sf.ScrollingDirection = ed.wrap and Enum.ScrollingDirection.Y or Enum.ScrollingDirection.XY
+            sf.CanvasPosition = V2(0, sf.CanvasPosition.Y)
+            setPill(pills.Wrap, ed.wrap)
+            ed.placeCode()
+            ed.fit()
+            ed.render()
+        end
+
+        -- ---------- event ----------
+        on(tb:GetPropertyChangedSignal("Text"), function()
+            if ed.loading then return end
+            local t = ed.tabs[ed.active]
+            if not t then return end
+            t.text = tb.Text
+            t.dirty = true
+            ed.status, ed.statusOk = nil, nil
+            ed.refreshGutter()
+            ed.scheduleRender()
+            ed.scheduleSave()
+            ed.paintTabs()
+            ed.updatePos()
+            ed.updateCaret(true)
+        end)
+        on(tb:GetPropertyChangedSignal("CursorPosition"), function()
+            ed.updatePos()
+            ed.updateCaret(true)
+        end)
+        on(tb:GetPropertyChangedSignal("AbsoluteSize"), ed.syncHl)
+        on(sf:GetPropertyChangedSignal("AbsoluteSize"), ed.fit)
+        on(sf:GetPropertyChangedSignal("CanvasPosition"), function()
+            gl.Position = UDim2.fromOffset(0, -sf.CanvasPosition.Y)
+        end)
+        on(tb.Focused, function() ed.updateCaret(false) end)
+        on(tb.FocusLost, function()
+            caret.Visible = false
+            ed.saveNow()
+        end)
+        on(pills.Save.MouseButton1Click, function()
+            ed.force = true
+            ed.saveNow()
+            ed.force = false
+        end)
+        on(pills["A-"].MouseButton1Click, function() ed.setSize(ed.size - 1) end)
+        on(pills["A+"].MouseButton1Click, function() ed.setSize(ed.size + 1) end)
+        on(pills.Wrap.MouseButton1Click, function()
+            ed.wrap = not ed.wrap
+            ed.applyWrap()
+        end)
+        on(pills.Color.MouseButton1Click, function()
+            SS.edHi = not (SS.edHi ~= false)
+            saveSS()
+            setPill(pills.Color, SS.edHi ~= false)
+            ed.render()
+        end)
+        on(pills.Size.MouseButton1Click, function()
+            local cur = SS.edFrac or 0.6
+            SS.edFrac = cur > 0.9 and 0.6 or (cur > 0.5 and 0.35 or 1)
+            saveSS()
+            if ACT.relayout then ACT.relayout() end
+        end)
+        on(pills.x.MouseButton1Click, function() ed.closeAll() end)
+        -- Ctrl+S saat mengetik
+        bind2(UIS.InputBegan, function(input)
+            if input.KeyCode == Enum.KeyCode.S and tb:IsFocused()
+                and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
+                ed.force = true
+                ed.saveNow()
+                ed.force = false
+            end
+        end)
+
+        setPill(pills.Color, SS.edHi ~= false)
+        setPill(pills.Wrap, false)
+        ed.measure()
+        ed.placeCode()
+        return ed
+    end
+
+    function ACT.openEditor(inst)
+        if typeof(inst) ~= "Instance" or not inst:IsA("LuaSourceContainer") then
+            notify("Pilih Script / LocalScript / ModuleScript dulu.", "warn")
+            return
+        end
+        if not UI.frame then return end
+        local okH, whyH = ACT.ensureScriptHolder(inst, ACT.TEMPLATES[inst.ClassName] or "")
+        if not okH then notify("Editor script: " .. tostring(whyH), "warn") end
+        local ed = ACT.edEnsure()
+        for i, t in ipairs(ed.tabs) do
+            if t.inst == inst then
+                ed.show()
+                ed.select(i)
+                return ed
+            end
+        end
+        local text = ACT.readSource(inst)
+        text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+        local t = { inst = inst, text = text, dirty = false }
+        ed.tabs[#ed.tabs + 1] = t
+        t.conn = inst.Destroying:Connect(function()
+            t.dead = true
+            task.defer(function()
+                for j, tt in ipairs(ed.tabs) do
+                    if tt == t then ed.closeTab(j) break end
+                end
+            end)
+        end)
+        t.nameConn = inst:GetPropertyChangedSignal("Name"):Connect(function()
+            if ed.frame and ed.frame.Parent then ed.drawTabs() end
+        end)
+        ed.drawTabs()
+        ed.show()
+        ed.select(#ed.tabs)
+        return ed
+    end
 end
 
 function ACT.openSelectedScript()
@@ -10649,20 +11169,94 @@ function NV.gui()
     return pg and pg:FindFirstChild("StudioGui")
 end
 
+-- v8: sembunyikan UI asli lebih keras.
+-- v7 hanya mematikan PlayerGui.StudioGui satu kali; kalau game menyalakannya lagi (atau ada ScreenGui native lain
+-- seperti dialog "Studio Lite" / tutorial) UI asli tetap muncul di atas Studio Editor dan menelan sentuhan.
+-- Sekarang: semua root native dimatikan, DisplayOrder diturunkan, dan dikunci (kalau game menyalakan lagi,
+-- langsung dimatikan lagi). Nilai asli disimpan di NV.seen dan dikembalikan saat editor ditutup.
+NV.seen = setmetatable({}, { __mode = "k" })
+NV.locks = {}
+NV.namePats = { "studio", "tutorial", "welcome", "explorer", "toolbox", "properties", "ribbon" }
+
+function NV.isNativeRoot(c)
+    if not c:IsA("LayerCollector") then return false end
+    local n = c.Name
+    if n:sub(1, 2) == "SL" then return false end -- GUI milik script ini (SLStudio, SLImporter, SLGizmoGui, SLPreview_*)
+    if n == "StudioGui" then return true end
+    if ST.playing then return false end -- saat Play, GUI buatan user tidak boleh ikut disembunyikan
+    local l = n:lower()
+    for _, p in ipairs(NV.namePats) do
+        if l:find(p, 1, true) then return true end
+    end
+    return false
+end
+
+function NV.unlockAll()
+    for _, c in pairs(NV.locks) do pcall(function() c:Disconnect() end) end
+    NV.locks = {}
+end
+
+function NV.lock(g)
+    if NV.locks[g] then return end
+    NV.locks[g] = g:GetPropertyChangedSignal("Enabled"):Connect(function()
+        if NV.dialog or CONFIG.HideNativeUi == false then return end
+        if g.Enabled and NV.seen[g] then
+            task.defer(function()
+                if not NV.dialog and CONFIG.HideNativeUi ~= false and NV.seen[g] then
+                    pcall(function() g.Enabled = false end)
+                end
+            end)
+        end
+    end)
+end
+
+function NV.restoreAll()
+    NV.unlockAll()
+    for c, rec in pairs(NV.seen) do
+        if c.Parent then
+            pcall(function() c.DisplayOrder = rec.order end)
+            if rec.enabled then pcall(function() c.Enabled = true end) end
+        end
+        NV.seen[c] = nil
+    end
+    ST.nativeWas = nil
+end
+
 function NV.applyHidden()
-    local g = NV.gui()
-    if not g or NV.dialog then return end
+    if NV.dialog then return end
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
     if CONFIG.HideNativeUi ~= false then
-        if g.Enabled then
-            ST.nativeWas = true
-            pcall(function() g.Enabled = false end)
+        for _, c in ipairs(pg:GetChildren()) do
+            if NV.isNativeRoot(c) then
+                local rec = NV.seen[c]
+                if not rec then
+                    rec = { order = c.DisplayOrder, enabled = c.Enabled }
+                    NV.seen[c] = rec
+                    ST.nativeWas = true
+                end
+                if c.Enabled then pcall(function() c.Enabled = false end) end
+                if c.DisplayOrder > -400 then pcall(function() c.DisplayOrder = -500 end) end
+                NV.lock(c)
+            end
         end
     else
-        if ST.nativeWas then
-            pcall(function() g.Enabled = true end)
-            ST.nativeWas = nil
+        NV.restoreAll()
+    end
+end
+
+-- daftar ScreenGui di PlayerGui ke Output (diagnosa: kalau masih ada UI asli yang nongol, namanya kelihatan di sini)
+function NV.logGuis()
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    local parts = {}
+    for _, c in ipairs(pg:GetChildren()) do
+        if c:IsA("LayerCollector") then
+            parts[#parts + 1] = string.format("%s[%s%s order=%s]", c.Name, c.Enabled and "on" or "off",
+                NV.isNativeRoot(c) and " native" or "", tostring(c.DisplayOrder))
         end
     end
+    logLine("PlayerGui: " .. table.concat(parts, ", "), "info")
 end
 
 local function matchAny(s, pats)
@@ -11589,7 +12183,12 @@ function RB.applyLayout()
     SP.b.Position, SP.b.Size = UDim2.fromOffset(lw, yBot - bh - 3), UDim2.fromOffset(midW, 6)
     SP.m.Visible = SS.ex and SS.pr
     SP.m.Position, SP.m.Size = UDim2.fromOffset(W - rw, y0 + exH - 3), UDim2.fromOffset(rw, 6)
+    if ACT.edLayout then ACT.edLayout(lw, y0, midW, math.max(60, availH - bh)) end
     ED.geo = { W = W, H = H, y0 = y0, yBot = yBot, availH = availH, lw = lw, rw = rw }
+end
+
+function ACT.relayout()
+    if UI.frame and P.ex then RB.applyLayout() end
 end
 
 function RB.togglePanel(key)
@@ -11784,6 +12383,8 @@ end
 -- ---------------------------------------------------------------
 local function destroyUi()
     gen = gen + 1
+    pcall(ACT.edReset)
+    pcall(NV.unlockAll)
     for i = #bc, 1, -1 do
         pcall(function() bc[i]:Disconnect() end)
         bc[i] = nil
@@ -11853,6 +12454,11 @@ local function build()
     on(root:GetPropertyChangedSignal("AbsoluteSize"), function() RB.applyLayout() end)
     ED.updateStatus()
     RB.refresh()
+    do
+        local pgN = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        if pgN then bind2(pgN.ChildAdded, function() task.defer(NV.applyHidden) end) end
+    end
+    pcall(NV.applyHidden)
     local g = gen
     task.spawn(function()
         local n = 0
@@ -11861,7 +12467,7 @@ local function build()
             n = n + 1
             pcall(RB.refresh)
             pcall(ED.updateStatus)
-            if n % 2 == 0 then pcall(NV.applyHidden) end
+            pcall(NV.applyHidden)
         end
     end)
 end
@@ -11902,10 +12508,7 @@ local function shutdown(restoreNative)
     ub = {}
     pcall(NV.close)
     destroyUi()
-    local g = NV.gui()
-    if g and (restoreNative or true) and ST.nativeWas then
-        pcall(function() g.Enabled = true end)
-    end
+    pcall(NV.restoreAll)
     env.__SLStudioGui = nil
 end
 
@@ -12060,6 +12663,7 @@ build()
 task.defer(function()
     if alive() then
         NV.applyHidden()
+        pcall(NV.logGuis)
         setStatus("Studio Editor siap. RightShift = sembunyikan / tampilkan.", "ok")
     end
 end)
